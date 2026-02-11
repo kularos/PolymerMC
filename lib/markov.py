@@ -1,5 +1,5 @@
 import torch
-from MCMC.PolymerMC.polymer_sim.core import rodrigues_torch
+from lib.core import rodrigues_torch
 import numpy as np
 
 class TorsionMCMC:

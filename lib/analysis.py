@@ -1,5 +1,5 @@
 import torch
-from MCMC.PolymerMC.polymer_sim.core import rodrigues_torch, align_geodesic
+from lib.core import rodrigues_torch, align_geodesic
 
 class PolymerAnalyzer:
     def __init__(self, sample, chains, device="cpu"):

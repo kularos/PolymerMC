@@ -1,8 +1,8 @@
-from .markov import TorsionMCMC
-from .plotting import WindowPlotter, GlobPlotter
 from .samplers import VonMisesSampler
 from .analysis import PolymerAnalyzer
+from .markov import TorsionMCMC
 from .core import Seed
+from .plotting import GlobPlotter, PhasePlotter, WindowPlotter, GraphPlotter, HistogramPlotter
 
 """ Module Structure:
 polymerMC
@@ -23,5 +23,7 @@ polymerMC
 |   run.py
 """
 
+plotters = ['GlobPlotter', 'PhasePlotter', 'WindowPlotter', 'GraphPlotter', 'HistogramPlotter']
+
 # This allows you to import everything directly from 'polymer_sim'
-__all__ = ['TorsionMCMC', 'WindowPlotter', 'GlobPlotter', 'VonMisesSampler', 'Seed', 'PolymerAnalyzer']
+__all__ = ['TorsionMCMC', 'VonMisesSampler', 'Seed', 'PolymerAnalyzer', *plotters]

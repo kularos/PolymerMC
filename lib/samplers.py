@@ -6,7 +6,7 @@ import pickle
 import hashlib
 import time
 from scipy.special import i0e
-from scipy.integrate import cumtrapz
+from scipy.integrate import cumulative_simpson
 
 
 class TorsionSampler:
@@ -14,7 +14,7 @@ class TorsionSampler:
     Base class with Bicubic Differentiable Interpolation and Caching.
     """
 
-    def __init__(self, chain_length, n_chains, cache_dir="cache/ICDF_cache", device="cpu"):
+    def __init__(self, chain_length, n_chains, cache_dir="local/cache/ICDF_cache", device="cpu"):
         self._device = device
         self.L = chain_length
         self.N = n_chains
@@ -32,7 +32,7 @@ class TorsionSampler:
             with open(path, 'rb') as f:
                 return torch.from_numpy(pickle.load(f)).to(self._device).to(torch.float32)
 
-        print(f"\n⚙️ Precomputing Dirichlet-Anchored Grid for {weights}...")
+        print(f"\n\t⚙️ Precomputing Dirichlet-Anchored Grid for {weights}...")
         grid_np = self.create_2d_grid(weights, k_grid, p_grid)
         with open(path, 'wb') as f:
             pickle.dump(grid_np, f)
@@ -106,7 +106,7 @@ class VonMisesSampler(TorsionSampler):
             k = k_vals[i]
             pdf = sum(w * (np.exp(k * (np.cos(x - mu) - 1)) / (2 * np.pi * i0e(k)))
                       for w, mu in zip(weights, self.tau_c))
-            cdf = cumtrapz(pdf, x, initial=0)
+            cdf = cumulative_simpson(pdf, x=x, initial=0)
             cdf /= cdf[-1]
             grid_np[i, :] = np.interp(p_vals, cdf, x)
 
