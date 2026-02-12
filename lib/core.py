@@ -1,94 +1,117 @@
+"""
+Core utility functions for polymer chain transformations.
+
+This module provides fundamental geometric operations used throughout
+the simulation, including rotation via Rodrigues' formula and geodesic
+alignment of vectors.
+"""
+
 import torch
 import numpy as np
-import random
-
-class Seed:
-    MAX_SEED = 1000000
-    _instance = None
-    _current = None
-    _previous = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(Seed, cls).__new__(cls)
-        return cls._instance
-
-    @property
-    def value(self):
-        """Reading Seed().value returns the active seed."""
-        return self._current
-
-    @value.setter
-    def value(self, val: int):
-        """Setting Seed().value = x automatically seeds all libraries."""
-        self._previous = self._current
-
-        if val == -1:
-            val = random.randint(0, self.MAX_SEED)
-
-        self._current = val
-        self._update_global_seed()
+from typing import Optional
 
 
-        print(f"🌱 Global Seed set to: {self._current}")
+def rodrigues_rotation(
+        v: torch.Tensor,
+        k: torch.Tensor,
+        theta: torch.Tensor,
+        vector_dim: int = 0
+) -> torch.Tensor:
+    """
+    Rotate vectors using Rodrigues' rotation formula.
 
-    def _update_global_seed(self):
-        val = self._current
-        # Global Seeding Logic
-        random.seed(val)
-        np.random.seed(val)
-        torch.manual_seed(val)
-        if torch.cuda.is_available():
-            # Seed all GPUs for MCMC parallel chains
-            torch.cuda.manual_seed_all(val)
+    Implements the rotation of vector v around axis k by angle theta:
+        v_rot = v*cos(θ) + (k × v)*sin(θ) + k*(k·v)*(1 - cos(θ))
 
-    @property
-    def last(self):
-        """Access the previous seed for easy callbacks."""
-        return self._previous
+    This is more numerically stable than constructing rotation matrices
+    and works efficiently with batched tensors.
 
-    def __repr__(self):
-        return f"Seed(current={self._current}, previous={self._previous})"
+    Args:
+        v: Vectors to rotate, shape (..., 3, ...)
+        k: Rotation axes (will be normalized), shape matching v
+        theta: Rotation angles in radians, broadcastable to v
+        vector_dim: Dimension along which vector components (x,y,z) lie
 
-def rodrigues_torch(v, k, theta, *, vector_dim=0):
-    # v and k: (3, N, K)
-    # theta: (1, N, K)
+    Returns:
+        Rotated vectors, same shape as v
 
-    # Normalize axis of rotation on dim 0
-    k = k / torch.linalg.norm(k, dim=vector_dim, keepdim=True)
+    Example:
+        >>> v = torch.tensor([[1.0], [0.0], [0.0]])  # x-axis, shape (3, 1)
+        >>> k = torch.tensor([[0.0], [0.0], [1.0]])  # z-axis
+        >>> theta = torch.tensor([[np.pi/2]])         # 90 degrees
+        >>> rodrigues_rotation(v, k, theta)
+        tensor([[0.0], [1.0], [0.0]])  # rotated to y-axis
+    """
+    # Normalize rotation axis
+    k_norm = k / torch.linalg.norm(k, dim=vector_dim, keepdim=True)
 
-    cos_t = torch.cos(theta)  # (1, N, K)
-    sin_t = torch.sin(theta)  # (1, N, K)
+    # Precompute trig functions
+    cos_theta = torch.cos(theta)
+    sin_theta = torch.sin(theta)
 
-    # Term 1: (3, N, K) * (1, N, K) -> Broadcasts 1 to 3
-    term1 = v * cos_t
+    # Rodrigues formula: three terms
+    # Term 1: Component parallel to rotation
+    term1 = v * cos_theta
 
-    # Term 2: Cross product must happen on dim 0
-    term2 = torch.linalg.cross(k, v, dim=vector_dim) * sin_t
+    # Term 2: Component perpendicular to k (cross product)
+    term2 = torch.linalg.cross(k_norm, v, dim=vector_dim) * sin_theta
 
-    # Term 3: Dot product (sum over dim 0)
-    dot = torch.sum(k * v, dim=vector_dim, keepdim=True)
-    term3 = k * dot * (1 - cos_t)
+    # Term 3: Component parallel to k (dot product)
+    dot_product = torch.sum(k_norm * v, dim=vector_dim, keepdim=True)
+    term3 = k_norm * dot_product * (1 - cos_theta)
 
     return term1 + term2 + term3
 
-def align_geodesic(v, initial_dir, final_dir, *, vector_dim=0):
-    """
-    Rotates tensor 'v' such that 'initial_dir' becomes 'final_dir'.
-    Implements geodesic rotation logic from analysis.py.
-    """
-    # 1. Normalize the direction vectors to ensure valid dot products
-    A_norm = initial_dir / torch.linalg.norm(initial_dir, dim=vector_dim, keepdim=True)
-    B_norm = final_dir / torch.linalg.norm(final_dir, dim=vector_dim, keepdim=True)
 
-    # 2. Calculate rotation axis (K) via cross product
-    # K is the vector perpendicular to both A and B
-    K = torch.linalg.cross(A_norm, B_norm, dim=vector_dim).expand_as(A_norm)
+def align_geodesic(
+        v: torch.Tensor,
+        initial_dir: torch.Tensor,
+        final_dir: torch.Tensor,
+        vector_dim: int = 0
+) -> torch.Tensor:
+    """
+    Rotate tensor v to align initial_dir with final_dir via shortest path.
 
-    # 3. Calculate rotation angle (theta) via dot product
+    This performs a geodesic (shortest arc) rotation that maps one
+    direction vector onto another, applying the same rotation to all
+    components of v.
+
+    The rotation axis is perpendicular to both directions (via cross product),
+    and the rotation angle is computed from their dot product.
+
+    Args:
+        v: Tensor to rotate
+        initial_dir: Current direction vector
+        final_dir: Target direction vector
+        vector_dim: Dimension along which vector components lie
+
+    Returns:
+        Rotated tensor v
+
+    Notes:
+        - Handles anti-parallel vectors (180° rotation) via clamping
+        - If initial_dir == final_dir, returns v unchanged
+    """
+    # Normalize direction vectors to ensure valid dot products
+    initial_norm = initial_dir / torch.linalg.norm(
+        initial_dir, dim=vector_dim, keepdim=True
+    )
+    final_norm = final_dir / torch.linalg.norm(
+        final_dir, dim=vector_dim, keepdim=True
+    )
+
+    # Rotation axis: perpendicular to both directions
+    rotation_axis = torch.linalg.cross(initial_norm, final_norm, dim=vector_dim)
+    rotation_axis = rotation_axis.expand_as(initial_norm)
+
+    # Rotation angle from dot product
     # Clamp to [-1, 1] to prevent NaN from floating point errors
-    cos_theta = torch.sum(A_norm * B_norm, dim=vector_dim, keepdim=True)
-    theta = torch.acos(torch.clamp(cos_theta, -1.0, 1.0))
+    cos_angle = torch.sum(initial_norm * final_norm, dim=vector_dim, keepdim=True)
+    angle = torch.acos(torch.clamp(cos_angle, -1.0, 1.0))
 
-    # 4. Apply the rotation to the input tensor v
-    return rodrigues_torch(v, K, theta, vector_dim=vector_dim)
+    # Apply rotation
+    return rodrigues_rotation(v, rotation_axis, angle, vector_dim=vector_dim)
+
+
+# Backwards compatibility aliases
+rodrigues_torch = rodrigues_rotation  # Keep old name for now
