@@ -12,103 +12,13 @@ separates concerns into:
 import torch
 import torch.nn.functional as F
 import numpy as np
-import os
-import pickle
-import hashlib
 import time
-from pathlib import Path
 from typing import Tuple
 from scipy.special import i0e
 from scipy.integrate import cumulative_simpson
 
-from config import SimulationConfig
-
-
-class GridCache:
-    """
-    Manages persistent caching of ICDF lookup tables.
-
-    Uses MD5 hashing of configuration parameters to generate unique
-    cache keys, ensuring different parameter sets don't collide.
-    """
-
-    def __init__(self, cache_dir: Path):
-        """
-        Initialize cache manager.
-
-        Args:
-            cache_dir: Directory for storing cached grids
-        """
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def _make_cache_key(
-            self,
-            class_name: str,
-            weights: Tuple[float, float, float],
-            k_range: Tuple[float, float],
-            k_res: int,
-            p_res: int
-    ) -> str:
-        """
-        Generate unique cache key from configuration.
-
-        Args:
-            class_name: Name of sampler class
-            weights: Von Mises weight triplet
-            k_range: Kappa range (min, max)
-            k_res: Kappa grid resolution
-            p_res: Probability grid resolution
-
-        Returns:
-            MD5 hash string
-        """
-        config_str = (
-            f"{class_name}_"
-            f"weights_{weights}_"
-            f"k_{k_range}_{k_res}_"
-            f"p_{p_res}_"
-            f"bicubic_dirichlet"
-        )
-        return hashlib.md5(config_str.encode()).hexdigest()
-
-    def load(self, cache_key: str) -> torch.Tensor | None:
-        """
-        Load grid from cache if it exists.
-
-        Args:
-            cache_key: Unique identifier for this grid
-
-        Returns:
-            Cached grid tensor, or None if not found
-        """
-        cache_path = self.cache_dir / f"grid_{cache_key}.pkl"
-
-        if not cache_path.exists():
-            return None
-
-        print(f"📦 Loading cached grid from {cache_path.name}...", end="", flush=True)
-
-        with open(cache_path, 'rb') as f:
-            grid_np = pickle.load(f)
-
-        print(" ✓")
-        return torch.from_numpy(grid_np).to(torch.float32)
-
-    def save(self, cache_key: str, grid: np.ndarray) -> None:
-        """
-        Save grid to cache.
-
-        Args:
-            cache_key: Unique identifier for this grid
-            grid: NumPy array to cache
-        """
-        cache_path = self.cache_dir / f"grid_{cache_key}.pkl"
-
-        with open(cache_path, 'wb') as f:
-            pickle.dump(grid, f)
-
-        print(f"💾 Cached grid to {cache_path.name}")
+from .config import SimulationConfig
+from .core import GridCache
 
 
 class VonMisesDistribution:

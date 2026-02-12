@@ -7,8 +7,9 @@ from torsion angle samples using bond rotation mechanics.
 
 import torch
 from typing import Optional
-from config import SimulationConfig
-from core import rodrigues_rotation
+
+from .config import SimulationConfig
+from .core import rodrigues_rotation
 
 
 class TorsionMCMC:

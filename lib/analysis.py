@@ -12,7 +12,8 @@ and statistical properties of polymer chain ensembles, including:
 import torch
 import numpy as np
 from typing import Tuple
-from core import rodrigues_rotation, align_geodesic
+
+from .core import rodrigues_rotation, align_geodesic
 
 
 class PolymerAnalyzer:
