@@ -14,15 +14,16 @@ plotting.* - Visualization classes
 
 Module Structure:
 ----------------
-polymer_sim/
-├── config.py           # Configuration management
-├── core.py             # Geometric utilities (Rodrigues rotation, etc.)
-├── samplers.py         # Von Mises sampler with caching
-├── markov.py           # MCMC chain generation
-├── analysis.py         # Chain analysis tools
-├── plotting.py         # Visualization classes
-├── run.py              # Main simulation script
-└── __init__.py         # This file
+├── run.py                  # Main simulation script
+├── local/                  # Cache Venv and output isolation
+└── lib/                    # Module library files
+    ├── config.py           # Configuration management
+    ├── core.py             # Geometric utilities (Rodrigues rotation, etc.)
+    ├── samplers.py         # Von Mises sampler with caching
+    ├── markov.py           # MCMC chain generation
+    ├── analysis.py         # Chain analysis tools
+    ├── plotting.py         # Visualization classes
+    └── __init__.py         # This file
 
 For detailed usage, see run.py or the documentation.
 """

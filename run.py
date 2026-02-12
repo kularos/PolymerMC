@@ -70,40 +70,43 @@ def setup_plotters() -> Tuple[GlobPlotter, PhasePlotter, HistogramPlotter]:
     return glob, phase, hist
 
 
-def generate_kappa_sweep(
-        p_min: float = 5.0,
-        p_max: float = 9.0,
-        n_points: int = 101
-) -> Tuple[np.ndarray, List[float]]:
+def generate_ps_sweep(
+    ps_min: float = 5.0,
+    ps_max: float = 9.0,
+    n_points: int = 101
+) -> np.ndarray:
     """
-    Generate logarithmic sweep of concentration parameters.
+    Generate linear sweep of entropy parameters.
 
-    Uses the pS parameterization: κ = 10^(7 - pS)
-    where pS ∈ [5, 9] gives κ ∈ [100, 0.01]
+    Uses the pS parameterization: pS = 7 - log10(κ)
+    where pS represents "entropy pH":
+    - Higher pS = higher entropy = more flexible chains
+    - Lower pS = lower entropy = stiffer chains
 
     Args:
-        p_min: Minimum pS value (higher concentration)
-        p_max: Maximum pS value (lower concentration)
+        ps_min: Minimum pS value (stiffer, pS=5 → κ=100)
+        ps_max: Maximum pS value (more flexible, pS=9 → κ=0.01)
         n_points: Number of points in sweep
 
     Returns:
-        ps_values: Array of pS values
-        kappas: List of corresponding κ values
+        Array of pS values
+
+    Example:
+            ps_vals = generate_ps_sweep(5.0, 9.0, 5)
+            # [5.0, 6.0, 7.0, 8.0, 9.0]
+            # Corresponds to κ = [100, 10, 1, 0.1, 0.01]
     """
-    ps_values = np.linspace(p_min, p_max, n_points)
-    kappas = [10 ** (7 - pS) for pS in ps_values]
-    return ps_values, kappas
+    return np.linspace(ps_min, ps_max, n_points)
 
 
 def run_weight_batch(
-        config: SimulationConfig,
-        sampler: VonMisesSampler,
-        markov: TorsionMCMC,
-        plotters: Tuple,
-        weights: Tuple[float, float, float],
-        ps_values: np.ndarray,
-        kappas: List[float],
-        progress_interval: int = 50
+    config: SimulationConfig,
+    sampler: VonMisesSampler,
+    markov: TorsionMCMC,
+    plotters: Tuple,
+    weights: Tuple[float, float, float],
+    ps_values: np.ndarray,
+    progress_interval: int = 50
 ) -> None:
     """
     Run simulation for one weight configuration.
@@ -114,8 +117,7 @@ def run_weight_batch(
         markov: MCMC chain builder
         plotters: Tuple of (glob, phase, hist) plotters
         weights: (T, Gp, Gn) weight configuration
-        ps_values: Array of pS parameterization values
-        kappas: List of concentration parameters
+        ps_values: Array of entropy parameters
         progress_interval: Print progress every N frames
     """
     T, Gp, Gn = weights
@@ -125,9 +127,9 @@ def run_weight_batch(
 
     timer = Timer()
 
-    # Generate samples for all kappa values
+    # Generate samples for all pS values (entropy parameters)
     print(f"🔄 Preparing data for W=({T},{Gp},{Gn})... ", end="", flush=True)
-    all_samples = sampler(weights=weights, kappas=kappas)
+    all_samples = sampler(weights=weights, ps_values=ps_values)
 
     # Build chains via MCMC
     markov.run(all_samples)
@@ -138,10 +140,12 @@ def run_weight_batch(
         print(f"🎬 Generating animation frames...")
 
         for i, pS in enumerate(ps_values):
-            # Extract data for this kappa value
+            # Extract data for this pS value
             chains_i = markov.chains[..., i]
             sample_i = all_samples[..., [i]]
-            kappa_i = kappas[i]
+
+            # Convert pS to kappa for display
+            kappa_i = config.ps_to_kappa(pS)
 
             # Analyze chains
             analyzer = PolymerAnalyzer(sample_i, chains_i)
@@ -149,7 +153,7 @@ def run_weight_batch(
             # Update all plots
             for plotter in all_plotters:
                 # Set title with current parameters
-                title = f"W=({T},{Gp},{Gn}), κ={kappa_i:.2e}, pS={pS:.2f}"
+                title = f"W=({T},{Gp},{Gn}), pS={pS:.2f} (κ={kappa_i:.2e})"
                 plotter.fig.suptitle(title, x=0.05, ha="left")
 
                 # Plot and capture frame
@@ -170,7 +174,7 @@ def run_weight_batch(
             # Per-frame status (overwrites)
             print(
                 f"\r  ↳ [Frame {i + 1}/{len(ps_values)}] "
-                f"κ: {kappa_i:.2e} | "
+                f"pS: {pS:.2f} (κ={kappa_i:.2e}) | "
                 f"Last: {frame_time * 1000:.1f}ms | "
                 f"Total: {timer.total:.2f}s",
                 end=""
@@ -200,10 +204,10 @@ def run_weight_batch(
 
 
 def run_simulation(
-        config: SimulationConfig,
-        weight_batches: List[Tuple[float, float, float]],
-        ps_range: Tuple[float, float] = (5.0, 9.0),
-        n_kappa_points: int = 101
+    config: SimulationConfig,
+    weight_batches: List[Tuple[float, float, float]],
+    pS_range: Tuple[float, float] = (5.0, 9.0),
+    n_pS_points: int = 101
 ) -> None:
     """
     Main simulation entry point.
@@ -211,37 +215,38 @@ def run_simulation(
     Args:
         config: Simulation configuration
         weight_batches: List of (T, Gp, Gn) weight configurations
-        ps_range: (min, max) for pS parameter sweep
-        n_kappa_points: Number of concentration parameters to sample
+        ps_range: (min, max) for pS parameter sweep (entropy)
+        n_ps_points: Number of entropy parameters to sample
     """
     # Apply random seed
     config.apply_seed()
 
     # Initialize components
-    print(f"\n{'=' * 60}")
+    print(f"\n{'='*60}")
     print(f"Polymer MCMC Simulation")
-    print(f"{'=' * 60}")
+    print(f"{'='*60}")
     print(f"Chain length: {config.chain_length}")
     print(f"Number of chains: {config.n_chains}")
     print(f"Device: {config.device}")
     print(f"Seed: {config.seed}")
-    print(f"{'=' * 60}\n")
+    print(f"{'='*60}\n")
 
     sampler = VonMisesSampler(config)
-    markov = TorsionMCMC(config, n_batches=n_kappa_points)
+    markov = TorsionMCMC(config, n_batches=n_pS_points)
 
     # Setup visualization
     plotters = setup_plotters()
 
-    # Generate parameter sweep
-    ps_values, kappas = generate_kappa_sweep(
-        ps_range[0],
-        ps_range[1],
-        n_kappa_points
-    )
+    # Generate parameter sweep (entropy parameterization)
+    ps_values = generate_ps_sweep(pS_range[0], pS_range[1], n_pS_points)
 
-    print(f"κ range: {kappas[0]:.2e} → {kappas[-1]:.2e}")
-    print(f"Number of κ values: {len(kappas)}\n")
+    # Convert to kappa for display
+    kappa_min = config.ps_to_kappa(pS_range[1])  # Higher pS = lower kappa
+    kappa_max = config.ps_to_kappa(pS_range[0])  # Lower pS = higher kappa
+
+    print(f"pS range: {pS_range[0]} → {pS_range[1]} (entropy parameterization)")
+    print(f"κ range: {kappa_max:.2e} → {kappa_min:.2e} (concentration)")
+    print(f"Number of points: {len(ps_values)}\n")
 
     # Process each weight configuration
     for weights in weight_batches:
@@ -251,13 +256,12 @@ def run_simulation(
             markov=markov,
             plotters=plotters,
             weights=weights,
-            ps_values=ps_values,
-            kappas=kappas
+            ps_values=ps_values
         )
 
-    print(f"\n{'=' * 60}")
+    print(f"\n{'='*60}")
     print(f"Simulation complete!")
-    print(f"{'=' * 60}\n")
+    print(f"{'='*60}\n")
 
 
 def main():
@@ -269,6 +273,7 @@ def main():
         n_chains=8,
         seed=1738,
         device="cpu",  # Change to "cuda" if GPU available
+        pS_range=(5.0, 9.0),  # Entropy range (flexible → stiff)
         frame_dpi=256,
         gif_duration=20
     )
@@ -276,16 +281,17 @@ def main():
     # Define weight configurations to simulate
     # (Trans, Gauche+, Gauche-) - should sum to 1.0
     weight_batches = [
-        (1.0, 0.0, 0.0),  # Pure trans
-        (0.0, 0.0, 1.0),  # Pure gauche-
+        (1, 0, 0),  # Pure trans
+        (1, 1, 1),  # Maximum Entropy
+        (0, 0, 1),  # Pure gauche-
     ]
 
     # Run simulation
     run_simulation(
         config=config,
         weight_batches=weight_batches,
-        ps_range=(5.0, 9.0),
-        n_kappa_points=101
+        pS_range=(4.0, 10.0),
+        n_pS_points=401
     )
 
 

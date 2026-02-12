@@ -2,11 +2,7 @@
 Torsion angle samplers for polymer Monte Carlo simulation.
 
 This module provides sampling from Von Mises distributions via
-inverse CDF interpolation on precomputed grids. The implementation
-separates concerns into:
-- Grid computation (pure math)
-- Caching logic (I/O)
-- Sampling interface (API)
+inverse CDF interpolation on precomputed grids.
 """
 
 import torch
@@ -39,9 +35,9 @@ class VonMisesDistribution:
 
     @staticmethod
     def pdf(
-            x: np.ndarray,
-            mu: float,
-            kappa: float
+        x: np.ndarray,
+        mu: float,
+        kappa: float
     ) -> np.ndarray:
         """
         Von Mises probability density function.
@@ -63,10 +59,10 @@ class VonMisesDistribution:
 
     @staticmethod
     def mixture_pdf(
-            x: np.ndarray,
-            weights: Tuple[float, float, float],
-            mus: Tuple[float, float, float],
-            kappa: float
+        x: np.ndarray,
+        weights: Tuple[int, int, int],
+        mus: Tuple[float, float, float],
+        kappa: float
     ) -> np.ndarray:
         """
         PDF of weighted mixture of Von Mises distributions.
@@ -88,11 +84,11 @@ class VonMisesDistribution:
 
     @staticmethod
     def create_icdf_grid(
-            weights: Tuple[float, float, float],
-            mus: Tuple[float, float, float],
-            k_grid: np.ndarray,
-            p_grid: np.ndarray,
-            verbose: bool = True
+        weights: Tuple[int, int, int],
+        mus: Tuple[float, float, float],
+        k_grid: np.ndarray,
+        p_grid: np.ndarray,
+        verbose: bool = True
     ) -> np.ndarray:
         """
         Precompute inverse CDF (quantile function) on 2D grid.
@@ -153,7 +149,7 @@ class VonMisesDistribution:
             if verbose and i % 10 == 0:
                 elapsed = time.perf_counter() - start_time
                 print(
-                    f"\r  Progress: {i}/{len(k_grid) - 2} | "
+                    f"\r  Progress: {i}/{len(k_grid)-2} | "
                     f"Time: {elapsed:.2f}s | κ: {kappa:.2e}",
                     end=""
                 )
@@ -187,7 +183,7 @@ class VonMisesSampler:
         Args:
             config: Simulation configuration containing:
                 - chain_length, n_chains: Sample dimensions
-                - k_range, k_res, p_res: Grid parameters
+                - ps_range, ps_res, p_res: Grid parameters (entropy parameterization)
                 - tau_centers: Mean directions (in degrees)
                 - cache_dir: Directory for grid caching
         """
@@ -199,13 +195,18 @@ class VonMisesSampler:
         # Convert tau centers from degrees to radians
         self.tau_c = config.tau_centers_radians
 
-        # Create kappa grid (logarithmic spacing)
-        self.k_grid = torch.logspace(
-            np.log10(config.k_range[0]),
-            np.log10(config.k_range[1]),
-            config.k_res,
-            device=self.device
+        # Create pS grid (entropy parameterization)
+        self.ps_grid = torch.linspace(
+            config.pS_range[0],
+            config.pS_range[1],
+            config.pS_res,
+            device=self.device,
+            dtype=torch.float64
         )
+
+        # Convert to kappa grid for numerical calculations
+        # κ = 10^(7 - pS), so higher pS = lower kappa = higher entropy
+        self.kappa_grid = 10 ** (7 - self.ps_grid)
 
         # Create probability grid (linear spacing)
         self.p_grid = torch.linspace(
@@ -219,8 +220,8 @@ class VonMisesSampler:
         self.cache = GridCache(config.cache_dir)
 
     def _get_or_create_grid(
-            self,
-            weights: Tuple[float, float, float]
+        self,
+        weights: Tuple[int, int, int]
     ) -> torch.Tensor:
         """
         Load grid from cache or compute if needed.
@@ -231,75 +232,77 @@ class VonMisesSampler:
         Returns:
             ICDF grid tensor on device
         """
-        # Generate cache key
-        cache_key = self.cache._make_cache_key(
+        # Try loading from cache with pS parameters
+        grid = self.cache.load(
             class_name=self.__class__.__name__,
             weights=weights,
-            k_range=self.config.k_range,
-            k_res=self.config.k_res,
+            ps_range=self.config.pS_range,
+            ps_res=self.config.pS_res,
             p_res=self.config.p_res
         )
-
-        # Try loading from cache
-        grid = self.cache.load(cache_key)
 
         if grid is not None:
             return grid.to(self.device)
 
-        # Compute new grid
+        # Compute new grid using kappa values
         print(f"⚙️  Computing new ICDF grid for weights={weights}")
         grid_np = VonMisesDistribution.create_icdf_grid(
             weights=weights,
             mus=self.tau_c,
-            k_grid=self.k_grid.cpu().numpy(),
+            k_grid=self.kappa_grid.cpu().numpy(),
             p_grid=self.p_grid.cpu().numpy(),
             verbose=True
         )
 
-        # Cache for future use
-        self.cache.save(cache_key, grid_np)
+        # Save to cache with pS parameters
+        self.cache.save(
+            grid_np,
+            class_name=self.__class__.__name__,
+            weights=weights,
+            ps_range=self.config.pS_range,
+            ps_res=self.config.pS_res,
+            p_res=self.config.p_res
+        )
 
         return torch.from_numpy(grid_np).to(self.device).to(torch.float32)
 
     def _interpolate_2d(
-            self,
-            p_samples: torch.Tensor,
-            kappas: torch.Tensor,
-            icdf_grid: torch.Tensor
+        self,
+        p_samples: torch.Tensor,
+        ps_values: torch.Tensor,
+        icdf_grid: torch.Tensor
     ) -> torch.Tensor:
         """
         Perform bicubic interpolation on ICDF grid.
 
-        Maps (probability, kappa) pairs to torsion angles using
+        Maps (probability, pS) pairs to torsion angles using
         differentiable bicubic interpolation for smooth gradients.
 
         Args:
             p_samples: Probability samples, shape (1, L, N, K)
-            kappas: Concentration parameters, shape (K,)
+            ps_values: Entropy parameters pS, shape (K,)
             icdf_grid: Precomputed ICDF table
 
         Returns:
             Torsion angle samples, shape (1, L, N, K)
         """
-        K = kappas.shape[0]
+        K = ps_values.shape[0]
 
-        # Reshape grid for grid_sample: (1, 1, k_res, p_res)
+        # Reshape grid for grid_sample: (1, 1, ps_res, p_res)
         grid_4d = icdf_grid.view(1, 1, *icdf_grid.shape)
 
-        # Normalize kappa to [-1, 1] (y-axis in grid_sample)
-        log_k = torch.log10(kappas)
-        log_k_grid = torch.log10(self.k_grid)
-        k_min, k_max = log_k_grid[0], log_k_grid[-1]
-        k_norm = 2.0 * (log_k - k_min) / (k_max - k_min) - 1.0
+        # Normalize pS to [-1, 1] (y-axis in grid_sample)
+        ps_min, ps_max = self.ps_grid[0], self.ps_grid[-1]
+        ps_norm = 2.0 * (ps_values - ps_min) / (ps_max - ps_min) - 1.0
 
         # Normalize probability to [-1, 1] (x-axis in grid_sample)
         p_min, p_max = self.p_grid[0], self.p_grid[-1]
         p_norm = 2.0 * (p_samples - p_min) / (p_max - p_min) - 1.0
 
         # Construct sampling grid: (1, L*N, K, 2)
-        # Last dimension is [x, y] = [probability, kappa]
-        k_norm_expanded = k_norm.view(1, 1, 1, K).expand(1, self.L, self.N, K)
-        sampling_grid = torch.stack([p_norm, k_norm_expanded], dim=-1)
+        # Last dimension is [x, y] = [probability, pS]
+        ps_norm_expanded = ps_norm.view(1, 1, 1, K).expand(1, self.L, self.N, K)
+        sampling_grid = torch.stack([p_norm, ps_norm_expanded], dim=-1)
         sampling_grid = sampling_grid.view(1, self.L * self.N, K, 2).to(torch.float32)
 
         # Bicubic interpolation (smooth, differentiable)
@@ -315,41 +318,62 @@ class VonMisesSampler:
         return samples.view(1, self.L, self.N, K).to(torch.float64)
 
     def __call__(
-            self,
-            weights: Tuple[float, float, float],
-            kappas: list[float] | np.ndarray | torch.Tensor
+        self,
+        weights: Tuple[int, int, int],
+        ps_values: list[float] | np.ndarray | torch.Tensor = None,
+        kappas: list[float] | np.ndarray | torch.Tensor = None
     ) -> torch.Tensor:
         """
         Sample torsion angles from Von Mises mixture.
 
         Args:
             weights: Mixture weights (T, Gp, Gn) summing to 1
-            kappas: Concentration parameters, length K
+            ps_values: Entropy parameters (preferred), length K
+                      Higher pS = higher entropy = more flexible
+                      pS = 7 - log10(κ)
+            kappas: Concentration parameters (legacy), length K
+                   If provided, will be converted to pS internally
 
         Returns:
             Torsion angle samples, shape (1, L, N, K)
 
         Example:
-            >>> sampler = VonMisesSampler(config)
-            >>> weights = (0.6, 0.2, 0.2)  # 60% trans, 20% each gauche
-            >>> kappas = [1e-2, 1e0, 1e2, 1e4]
-            >>> samples = sampler(weights, kappas)
-            >>> samples.shape
-            torch.Size([1, 128, 8, 4])
+                sampler = VonMisesSampler(config)
+                weights = (0.6, 0.2, 0.2)  # 60% trans, 20% each gauche
+
+                # Preferred: use pS (entropy parameterization)
+                ps_vals = [5.0, 7.0, 9.0]  # flexible → stiff
+                samples = sampler(weights, ps_values=ps_vals)
+
+                # Legacy: use kappa (concentration)
+                kappas = [1e2, 1e0, 1e-2]
+                samples = sampler(weights, kappas=kappas)
         """
+        # Handle input: prefer ps_values, fall back to kappas
+        if ps_values is None and kappas is None:
+            raise ValueError("Must provide either ps_values or kappas")
+
+        if ps_values is not None and kappas is not None:
+            raise ValueError("Provide either ps_values OR kappas, not both")
+
+        # Convert kappas to pS if needed (backward compatibility)
+        if kappas is not None:
+            kappas_array = np.asarray(kappas)
+            ps_values = self.config.kappa_to_ps(kappas_array)
+
         # Load or compute ICDF grid
         icdf_grid = self._get_or_create_grid(weights)
 
-        # Convert kappas to tensor
-        kappas = torch.as_tensor(
-            kappas,
+        # Convert pS to tensor
+        ps_tensor = torch.as_tensor(
+            ps_values,
             device=self.device,
             dtype=torch.float64
         )
-        K = kappas.shape[0]
+        K = ps_tensor.shape[0]
 
         # Generate uniform random probabilities
-        # Use same probability for all kappa values to enable tracking
+        # Use same probability for all pS values to enable tracking
         p_samples = torch.rand(
             (1, self.L, self.N, 1),
             device=self.device,
@@ -358,32 +382,33 @@ class VonMisesSampler:
         p_samples = p_samples.expand(-1, -1, -1, K)
 
         # Interpolate to get torsion angles
-        return self._interpolate_2d(p_samples, kappas, icdf_grid)
+        return self._interpolate_2d(p_samples, ps_tensor, icdf_grid)
 
-    def get_kappa_gradient(
-            self,
-            weights: Tuple[float, float, float],
-            kappas: list[float] | np.ndarray | torch.Tensor
+    def get_ps_gradient(
+        self,
+        weights: Tuple[float, float, float],
+        ps_values: list[float] | np.ndarray | torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute gradient of torsion angles with respect to kappa.
+        Compute gradient of torsion angles with respect to pS.
 
-        Useful for sensitivity analysis and gradient-based optimization.
+        Useful for sensitivity analysis: shows how chain structure
+        changes with entropy parameter.
 
         Args:
             weights: Mixture weights
-            kappas: Concentration parameters
+            ps_values: Entropy parameters
 
         Returns:
-            Gradients ∂τ/∂κ, shape (1, L, N, K)
+            Gradients ∂τ/∂pS, shape (1, L, N, K)
         """
         # Ensure gradients are tracked
-        k_tensor = torch.as_tensor(
-            kappas,
+        ps_tensor = torch.as_tensor(
+            ps_values,
             device=self.device,
             dtype=torch.float64
         )
-        k_tensor.requires_grad_(True)
+        ps_tensor.requires_grad_(True)
 
         # Forward pass
         icdf_grid = self._get_or_create_grid(weights)
@@ -393,16 +418,55 @@ class VonMisesSampler:
             device=self.device,
             dtype=torch.float64
         )
-        p_samples = p_samples.expand(-1, -1, -1, k_tensor.shape[0])
+        p_samples = p_samples.expand(-1, -1, -1, ps_tensor.shape[0])
 
-        taus = self._interpolate_2d(p_samples, k_tensor, icdf_grid)
+        taus = self._interpolate_2d(p_samples, ps_tensor, icdf_grid)
 
         # Compute gradients
         grads = torch.autograd.grad(
             outputs=taus,
-            inputs=k_tensor,
+            inputs=ps_tensor,
             grad_outputs=torch.ones_like(taus),
             create_graph=True
         )[0]
 
         return grads
+
+    def get_kappa_gradient(
+        self,
+        weights: Tuple[int, int, int],
+        kappas: list[float] | np.ndarray | torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute gradient of torsion angles with respect to kappa.
+
+        Legacy method - prefer get_ps_gradient for clearer interpretation.
+
+        Args:
+            weights: Mixture weights
+            kappas: Concentration parameters
+
+        Returns:
+            Gradients ∂τ/∂κ, shape (1, L, N, K)
+        """
+        # Convert kappa to pS
+        kappas_array = np.asarray(kappas)
+        ps_values = self.config.kappa_to_ps(kappas_array)
+
+        # Get pS gradient
+        dτ_dpS = self.get_ps_gradient(weights, ps_values)
+
+        # Apply chain rule: dτ/dκ = (dτ/dpS) * (dpS/dκ)
+        # pS = 7 - log10(κ), so dpS/dκ = -1/(κ ln(10))
+        kappas_tensor = torch.as_tensor(
+            kappas_array,
+            device=self.device,
+            dtype=torch.float64
+        )
+        dpS_dκ = -1 / (kappas_tensor * np.log(10))
+
+        # Broadcast and multiply
+        dpS_dκ = dpS_dκ.view(1, 1, 1, -1)
+        dτ_dκ = dτ_dpS * dpS_dκ
+
+        return dτ_dκ

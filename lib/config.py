@@ -51,10 +51,13 @@ class SimulationConfig:
     device: str = "cpu"
 
     # Von Mises sampler parameters
-    k_range: Tuple[float, float] = (1e-3, 1e7)
-    k_res: int = 1000
-    p_res: int = 100000
-    tau_centers: Tuple[float, float, float] = (0.0, -120.0, 120.0)  # degrees
+    # pS parameterization: pS = 7 - log10(κ)
+    # Higher pS = higher entropy (more flexible chains)
+    # pS=5 → κ=10², pS=7 → κ=1, pS=9 → κ=10⁻²
+    pS_range: Tuple[float, float] = (2.0, 12.0)  # Entropy range
+    pS_res: int = 1000  # Resolution of pS grid
+    p_res: int = 100000  # Probability resolution for ICDF
+    tau_c: Tuple[float, float, float] = (0.0, -120.0, 120.0)  # degrees
 
     # File system paths
     cache_dir: Path = field(default_factory=lambda: Path("./local/cache/ICDF_cache"))
@@ -117,7 +120,59 @@ class SimulationConfig:
     @property
     def tau_centers_radians(self) -> np.ndarray:
         """Get torsion angle centers converted to radians."""
-        return np.radians(self.tau_centers)
+        return np.radians(self.tau_c)
+
+    @property
+    def kappa_range(self) -> Tuple[float, float]:
+        """
+        Get kappa range from pS range.
+
+        Returns:
+            (kappa_min, kappa_max) corresponding to (ps_max, ps_min)
+            Note the reversal: higher pS = lower kappa
+        """
+        ps_min, ps_max = self.pS_range
+        kappa_max = 10 ** (7 - ps_min)  # Low entropy = high kappa
+        kappa_min = 10 ** (7 - ps_max)  # High entropy = low kappa
+        return (kappa_min, kappa_max)
+
+    @staticmethod
+    def ps_to_kappa(ps: float | np.ndarray) -> float | np.ndarray:
+        """
+        Convert pS (entropy parameter) to κ (concentration).
+
+        Args:
+            ps: Entropy parameter (higher = more flexible)
+
+        Returns:
+            kappa: Concentration parameter (higher = more stiff)
+
+        Example:
+                SimulationConfig.ps_to_kappa(5.0)
+            100.0  # Flexible
+                SimulationConfig.ps_to_kappa(9.0)
+            0.01   # Stiff
+        """
+        return 10 ** (7 - ps)
+
+    @staticmethod
+    def kappa_to_ps(kappa: float | np.ndarray) -> float | np.ndarray:
+        """
+        Convert κ (concentration) to pS (entropy parameter).
+
+        Args:
+            kappa: Concentration parameter
+
+        Returns:
+            ps: Entropy parameter
+
+        Example:
+                SimulationConfig.kappa_to_ps(100.0)
+            5.0
+                SimulationConfig.kappa_to_ps(0.01)
+            9.0
+        """
+        return 7 - np.log10(kappa)
 
     def output_path(self, weights: Tuple[float, float, float]) -> Path:
         """
@@ -140,7 +195,7 @@ class SimulationConfig:
             f"SimulationConfig(\n"
             f"  chain_length={self.chain_length}, n_chains={self.n_chains}\n"
             f"  seed={self.seed}, device={self.device}\n"
-            f"  k_range={self.k_range}, k_res={self.k_res}\n"
+            f"  pS_range={self.pS_range}, pS_res={self.pS_res}\n"
             f"  cache_dir={self.cache_dir}\n"
             f"  output_dir={self.output_dir}\n"
             f")"

@@ -3,112 +3,21 @@ Core utility functions for polymer chain transformations.
 
 This module provides fundamental geometric operations used throughout
 the simulation, including rotation via Rodrigues' formula and geodesic
-alignment of vectors.
+alignment of vectors, plus caching infrastructure.
 """
-import os
-import hashlib
-from pathlib import Path
-import pickle
 
 import torch
 import numpy as np
-from typing import Optional, Tuple
-
-
-
-
-class GridCache:
-    """
-    Manages persistent caching of ICDF lookup tables.
-
-    Uses MD5 hashing of configuration parameters to generate unique
-    cache keys, ensuring different parameter sets don't collide.
-    """
-
-    def __init__(self, cache_dir: Path):
-        """
-        Initialize cache manager.
-
-        Args:
-            cache_dir: Directory for storing cached grids
-        """
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def _make_cache_key(
-            self,
-            class_name: str,
-            weights: Tuple[float, float, float],
-            k_range: Tuple[float, float],
-            k_res: int,
-            p_res: int
-    ) -> str:
-        """
-        Generate unique cache key from configuration.
-
-        Args:
-            class_name: Name of sampler class
-            weights: Von Mises weight triplet
-            k_range: Kappa range (min, max)
-            k_res: Kappa grid resolution
-            p_res: Probability grid resolution
-
-        Returns:
-            MD5 hash string
-        """
-        config_str = (
-            f"{class_name}_"
-            f"weights_{weights}_"
-            f"k_{k_range}_{k_res}_"
-            f"p_{p_res}_"
-            f"bicubic_dirichlet"
-        )
-        return hashlib.md5(config_str.encode()).hexdigest()
-
-    def load(self, cache_key: str) -> torch.Tensor | None:
-        """
-        Load grid from cache if it exists.
-
-        Args:
-            cache_key: Unique identifier for this grid
-
-        Returns:
-            Cached grid tensor, or None if not found
-        """
-        cache_path = self.cache_dir / f"grid_{cache_key}.pkl"
-
-        if not cache_path.exists():
-            return None
-
-        print(f"📦 Loading cached grid from {cache_path.name}...", end="", flush=True)
-
-        with open(cache_path, 'rb') as f:
-            grid_np = pickle.load(f)
-
-        print(" ✓")
-        return torch.from_numpy(grid_np).to(torch.float32)
-
-    def save(self, cache_key: str, grid: np.ndarray) -> None:
-        """
-        Save grid to cache.
-
-        Args:
-            cache_key: Unique identifier for this grid
-            grid: NumPy array to cache
-        """
-        cache_path = self.cache_dir / f"grid_{cache_key}.pkl"
-
-        with open(cache_path, 'wb') as f:
-            pickle.dump(grid, f)
-
-        print(f"💾 Cached grid to {cache_path.name}")
+import pickle
+from pathlib import Path
+from typing import Optional, Tuple, Any
 
 
 def rodrigues_rotation(
-        v: torch.Tensor,
-        k: torch.Tensor,
-        theta: torch.Tensor,
-        vector_dim: int = 0
+    v: torch.Tensor,
+    k: torch.Tensor,
+    theta: torch.Tensor,
+    vector_dim: int = 0
 ) -> torch.Tensor:
     """
     Rotate vectors using Rodrigues' rotation formula.
@@ -129,6 +38,10 @@ def rodrigues_rotation(
         Rotated vectors, same shape as v
 
     Example:
+            v = torch.tensor([[1.0], [0.0], [0.0]])  # x-axis, shape (3, 1)
+            k = torch.tensor([[0.0], [0.0], [1.0]])  # z-axis
+            theta = torch.tensor([[np.pi/2]])         # 90 degrees
+            rodrigues_rotation(v, k, theta)
         tensor([[0.0], [1.0], [0.0]])  # rotated to y-axis
     """
     # Normalize rotation axis
@@ -153,10 +66,10 @@ def rodrigues_rotation(
 
 
 def align_geodesic(
-        v: torch.Tensor,
-        initial_dir: torch.Tensor,
-        final_dir: torch.Tensor,
-        vector_dim: int = 0
+    v: torch.Tensor,
+    initial_dir: torch.Tensor,
+    final_dir: torch.Tensor,
+    vector_dim: int = 0
 ) -> torch.Tensor:
     """
     Rotate tensor v to align initial_dir with final_dir via shortest path.
@@ -204,3 +117,177 @@ def align_geodesic(
 
 # Backwards compatibility aliases
 rodrigues_torch = rodrigues_rotation  # Keep old name for now
+
+
+class GridCache:
+    """
+    Manages persistent caching of lookup tables with human-readable keys.
+
+    Cache keys are constructed from the parameters that define uniqueness,
+    making it easy to identify and manage cached files.
+
+    Example cache filename:
+        VonMisesSampler_w(0.6,0.2,0.2)_k(1e-3,1e7,1000)_p(100000).pkl
+    """
+
+    def __init__(self, cache_dir: Path):
+        """
+        Initialize cache manager.
+
+        Args:
+            cache_dir: Directory for storing cached grids
+        """
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _make_cache_key(self, **params) -> str:
+        """
+        Generate human-readable cache key from parameters.
+
+        Creates a filename-safe string that clearly shows what parameters
+        define this cached grid.
+
+        Args:
+            **params: Any parameters that define cache uniqueness
+                Common params: class_name, weights, ps_range, ps_res, p_res
+
+        Returns:
+            Human-readable cache key string
+
+        Example:
+                cache._make_cache_key(
+            ...     class_name="VonMisesSampler",
+            ...     weights=(0.6, 0.2, 0.2),
+            ...     ps_range=(5.0, 9.0),
+            ...     ps_res=1000,
+            ...     p_res=100000
+            ... )
+            'VonMisesSampler_w(0.6,0.2,0.2)_pS(5.0,9.0,1000)_p(100000)'
+        """
+        parts = []
+
+        # Add class name first
+        if 'class_name' in params:
+            parts.append(str(params['class_name']))
+
+        # Add weights (w)
+        if 'weights' in params:
+            w = params['weights']
+            parts.append(f"w({w[0]},{w[1]},{w[2]})")
+
+        # Add pS range and resolution (entropy parameterization)
+        if 'ps_range' in params and 'ps_res' in params:
+            ps_min, ps_max = params['ps_range']
+            ps_res = params['ps_res']
+            parts.append(f"pS({ps_min},{ps_max},{ps_res})")
+
+        # Add probability resolution (p)
+        if 'p_res' in params:
+            parts.append(f"p({params['p_res']})")
+
+        return "_".join(parts)
+
+    def load(self, **params) -> Optional[torch.Tensor]:
+        """
+        Load grid from cache if it exists.
+
+        Args:
+            **params: Parameters defining the cache key
+                Required: class_name
+                Typical: weights, ps_range, ps_res, p_res
+
+        Returns:
+            Cached grid tensor, or None if not found
+
+        Example:
+                grid = cache.load(
+            ...     class_name="VonMisesSampler",
+            ...     weights=(0.6, 0.2, 0.2),
+            ...     ps_range=(5.0, 9.0),
+            ...     ps_res=1000,
+            ...     p_res=100000
+            ... )
+        """
+        cache_key = self._make_cache_key(**params)
+        cache_path = self.cache_dir / f"{cache_key}.pkl"
+
+        if not cache_path.exists():
+            return None
+
+        print(f"📦 Loading cached grid: {cache_key}", end="", flush=True)
+
+        with open(cache_path, 'rb') as f:
+            grid_np = pickle.load(f)
+
+        print(" ✓")
+        return torch.from_numpy(grid_np).to(torch.float32)
+
+    def save(self, grid: np.ndarray, **params) -> None:
+        """
+        Save grid to cache.
+
+        Args:
+            grid: NumPy array to cache
+            **params: Parameters defining the cache key (same as load())
+
+        Example:
+                cache.save(
+            ...     grid,
+            ...     class_name="VonMisesSampler",
+            ...     weights=(0.6, 0.2, 0.2),
+            ...     ps_range=(5.0, 9.0),
+            ...     ps_res=1000,
+            ...     p_res=100000
+            ... )
+        """
+        cache_key = self._make_cache_key(**params)
+        cache_path = self.cache_dir / f"{cache_key}.pkl"
+
+        with open(cache_path, 'wb') as f:
+            pickle.dump(grid, f)
+
+        print(f"💾 Cached grid: {cache_key}")
+
+    def clear(self, **params) -> bool:
+        """
+        Delete specific cache file.
+
+        Args:
+            **params: Parameters defining the cache key
+
+        Returns:
+            True if file was deleted, False if not found
+        """
+        cache_key = self._make_cache_key(**params)
+        cache_path = self.cache_dir / f"{cache_key}.pkl"
+
+        if cache_path.exists():
+            cache_path.unlink()
+            print(f"🗑️  Deleted cache: {cache_key}")
+            return True
+        return False
+
+    def clear_all(self) -> int:
+        """
+        Delete all cache files in the cache directory.
+
+        Returns:
+            Number of files deleted
+        """
+        count = 0
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            cache_file.unlink()
+            count += 1
+
+        if count > 0:
+            print(f"🗑️  Deleted {count} cache files")
+        return count
+
+    def list_cached(self) -> list[str]:
+        """
+        List all cached grid keys.
+
+        Returns:
+            List of cache key strings (without .pkl extension)
+        """
+        return [f.stem for f in self.cache_dir.glob("*.pkl")]
