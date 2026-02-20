@@ -54,9 +54,10 @@ class SimulationConfig:
         gif_fps: Frames per second for animations
     """
 
-    # Core simulation parameters - hierarchical bisection
+    # Core simulation parameters
+    # pGamma is no longer a config-level field — bisection level is chosen
+    # lazily at analysis time via PolymerAnalyzer.generate_assets(pGamma).
     pL: int = 7  # log2(total_length): pL=7 → 128 monomers, pL=12 → 4096 monomers
-    pGamma: int = 3  # log2(n_bisections): pGamma=3 → 8 chains
     seed: int | None = 1738
 
     # Hardware configuration
@@ -145,34 +146,14 @@ class SimulationConfig:
         return 2 ** self.pL
 
     @property
-    def chain_length(self) -> int:
+    def valid_pGamma_range(self) -> range:
         """
-        Get length of each bisected chain.
+        All valid bisection levels for this configuration: 0 .. pL inclusive.
 
-        Returns:
-            Chain length = 2^pL / 2^pGamma = 2^(pL - pGamma)
-
-        Example:
-            >>> config = SimulationConfig(pL=12, pGamma=2)
-            >>> config.chain_length  # 4096 / 4 = 1024
-            1024
+            pGamma=0:  1 chain  × 2^pL monomers  (full chain view)
+            pGamma=pL: 2^pL chains × 1 monomer   (monomer scale)
         """
-        return 2 ** (self.pL - self.pGamma)
-
-    @property
-    def n_chains(self) -> int:
-        """
-        Get number of bisected chains.
-
-        Returns:
-            Number of chains = 2^pGamma
-
-        Example:
-            >>> config = SimulationConfig(pGamma=3)
-            >>> config.n_chains  # 2^3 = 8
-            8
-        """
-        return 2 ** self.pGamma
+        return range(0, self.pL + 1)
 
     @property
     def tau_centers_radians(self) -> np.ndarray:
@@ -250,9 +231,10 @@ class SimulationConfig:
         """Formatted string representation of configuration."""
         return (
             f"SimulationConfig(\n"
-            f"  chain_length={self.chain_length}, n_chains={self.n_chains}\n"
+            f"  pL={self.pL}, total_length={self.total_length}\n"
+            f"  pGamma sweep: 0 .. {self.pL} ({self.pL + 1} levels)\n"
             f"  seed={self.seed}, device={self.device}\n"
-            f"  k_range={self.k_range}, k_res={self.k_res}\n"
+            f"  pS_range={self.pS_range}, pS_res={self.pS_res}\n"
             f"  cache_dir={self.cache_dir}\n"
             f"  output_dir={self.output_dir}\n"
             f")"
