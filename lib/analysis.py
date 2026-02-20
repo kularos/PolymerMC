@@ -12,45 +12,77 @@ and statistical properties of polymer chain ensembles, including:
 import torch
 import numpy as np
 from typing import Tuple
-
 from .core import rodrigues_rotation, align_geodesic
 
 
 class PolymerAnalyzer:
     """
-    Analyzer for polymer chain ensemble properties.
+    Analyzer for polymer chain ensemble properties with hierarchical bisection.
 
-    This class wraps a set of polymer chains and provides methods for
-    computing various geometric and statistical properties, including
-    distances, alignments, and orientations.
+    This class wraps a polymer chain and bisects it according to pGamma,
+    providing methods for computing various geometric and statistical properties.
+
+    The hierarchical structure allows analysis at different subdivision levels:
+    - pGamma=0: One long chain (2^pL monomers)
+    - pGamma=1: Two chains (2^(pL-1) monomers each)
+    - pGamma=2: Four chains (2^(pL-2) monomers each)
+    - etc.
 
     Attributes:
-        shape: (n_chains, chain_length, 3) shape of chain ensemble
-        chain_length: Number of monomers per chain
-        n_chains: Number of chains in ensemble
+        shape: (n_chains, chain_length, 3) shape of bisected ensemble
+        chain_length: Number of monomers per bisected chain = 2^(pL - pGamma)
+        n_chains: Number of bisected chains = 2^pGamma
+        pL: log2 of total length
+        pGamma: log2 of number of bisections
     """
 
     def __init__(
-            self,
-            torsion_samples: torch.Tensor,
-            chains: torch.Tensor,
-            device: str = "cpu"
+        self,
+        torsion_samples: torch.Tensor,
+        chains: torch.Tensor,
+        pL: int,
+        pGamma: int = 0,
+        device: str = "cpu"
     ):
         """
-        Initialize analyzer with chain configurations.
+        Initialize analyzer with chain and bisection parameters.
 
         Args:
-            torsion_samples: Torsion angle samples, shape (1, L, N, 1)
-            chains: Chain coordinates, shape (3, L, N)
+            torsion_samples: Torsion angle samples, shape (1, 2^pL, 1) or (2^pL,)
+            chains: Chain coordinates, shape (3, 2^pL, 1) or (3, 2^pL)
+            pL: log2 of total chain length
+            pGamma: log2 of number of bisections (default 0 = no subdivision)
             device: Device for tensor operations
         """
         self._device = device
-        self._taus = torsion_samples
-        self._chains = chains
-        self.shape = chains.shape
+        self.pL = pL
+        self.pGamma = pGamma
+
+        self.total_length = 2 ** pL
+        self.n_chains = 2 ** pGamma
+        self.chain_length = 2 ** (pL - pGamma)
+
+        # Squeeze and reshape torsion samples
+        if torsion_samples.dim() == 3:
+            torsion_samples = torsion_samples.squeeze(0).squeeze(-1)  # (2^pL,)
+        elif torsion_samples.dim() == 2:
+            torsion_samples = torsion_samples.squeeze(-1)  # (2^pL,)
+
+        # Reshape to (chain_length, n_chains) via bisection
+        self._taus = torsion_samples.view(self.n_chains, self.chain_length).T
+
+        # Squeeze and reshape chains
+        if chains.dim() == 3:
+            chains = chains.squeeze(-1)  # (3, 2^pL)
+
+        # Reshape to (3, chain_length, n_chains) via bisection
+        # Split the long chain into n_chains segments
+        self._chains = chains.view(3, self.n_chains, self.chain_length).transpose(1, 2)
+
+        self.shape = self._chains.shape
 
         # Precompute pairwise distance matrix for efficiency
-        # Permute to (N, L, 3) for cdist, then back to (L, N, N)
+        # Permute to (n_chains, chain_length, 3) for cdist, then back to (chain_length, n_chains, n_chains)
         x = self._chains.permute(2, 1, 0)
         self._dist = torch.cdist(x, x).permute(1, 2, 0)
 
@@ -64,7 +96,7 @@ class PolymerAnalyzer:
     @property
     def taus(self) -> np.ndarray:
         """Get torsion angle samples as NumPy array."""
-        return self._taus.squeeze().numpy()
+        return self._taus.squeeze(dim=0).numpy()
 
     @property
     def torsion(self) -> np.ndarray:

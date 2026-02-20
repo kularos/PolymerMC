@@ -70,9 +70,9 @@ def setup_plotters() -> Tuple[GlobPlotter, PhasePlotter, HistogramPlotter]:
     return glob, phase, hist
 
 
-def generate_ps_sweep(
-    ps_min: float = 5.0,
-    ps_max: float = 9.0,
+def generate_pS_sweep(
+    pS_min: float = 5.0,
+    pS_max: float = 9.0,
     n_points: int = 101
 ) -> np.ndarray:
     """
@@ -84,19 +84,19 @@ def generate_ps_sweep(
     - Lower pS = lower entropy = stiffer chains
 
     Args:
-        ps_min: Minimum pS value (stiffer, pS=5 → κ=100)
-        ps_max: Maximum pS value (more flexible, pS=9 → κ=0.01)
+        pS_min: Minimum pS value (stiffer, pS=5 → κ=100)
+        pS_max: Maximum pS value (more flexible, pS=9 → κ=0.01)
         n_points: Number of points in sweep
 
     Returns:
         Array of pS values
 
     Example:
-            ps_vals = generate_ps_sweep(5.0, 9.0, 5)
+            pS_vals = generate_pS_sweep(5.0, 9.0, 5)
             # [5.0, 6.0, 7.0, 8.0, 9.0]
             # Corresponds to κ = [100, 10, 1, 0.1, 0.01]
     """
-    return np.linspace(ps_min, ps_max, n_points)
+    return np.linspace(pS_min, pS_max, n_points)
 
 
 def run_weight_batch(
@@ -105,7 +105,7 @@ def run_weight_batch(
     markov: TorsionMCMC,
     plotters: Tuple,
     weights: Tuple[float, float, float],
-    ps_values: np.ndarray,
+    pS_values: np.ndarray,
     progress_interval: int = 50
 ) -> None:
     """
@@ -117,7 +117,7 @@ def run_weight_batch(
         markov: MCMC chain builder
         plotters: Tuple of (glob, phase, hist) plotters
         weights: (T, Gp, Gn) weight configuration
-        ps_values: Array of entropy parameters
+        pS_values: Array of entropy parameters
         progress_interval: Print progress every N frames
     """
     T, Gp, Gn = weights
@@ -128,8 +128,8 @@ def run_weight_batch(
     timer = Timer()
 
     # Generate samples for all pS values (entropy parameters)
-    print(f"🔄 Preparing data for W=({T},{Gp},{Gn})... ", end="", flush=True)
-    all_samples = sampler(weights=weights, ps_values=ps_values)
+    print(f"🔄 Preparing data for W=({T},{Gp},{Gn})... ", end="\n\t↳ ", flush=True)
+    all_samples = sampler(weights=weights, pS_values=pS_values)
 
     # Build chains via MCMC
     markov.run(all_samples)
@@ -139,16 +139,16 @@ def run_weight_batch(
     try:
         print(f"🎬 Generating animation frames...")
 
-        for i, pS in enumerate(ps_values):
+        for i, pS in enumerate(pS_values):
             # Extract data for this pS value
             chains_i = markov.chains[..., i]
             sample_i = all_samples[..., [i]]
 
             # Convert pS to kappa for display
-            kappa_i = config.ps_to_kappa(pS)
+            kappa_i = config.pS_to_kappa(pS)
 
             # Analyze chains
-            analyzer = PolymerAnalyzer(sample_i, chains_i)
+            analyzer = PolymerAnalyzer(sample_i, chains_i, config.pL, config.pGamma)
 
             # Update all plots
             for plotter in all_plotters:
@@ -166,14 +166,14 @@ def run_weight_batch(
             if (i + 1) % progress_interval == 0:
                 total_time = timer.total
                 print(
-                    f"\r  ✅ Progress: {i + 1}/{len(ps_values)} frames | "
+                    f"\r  ✅ Progress: {i + 1}/{len(pS_values)} frames | "
                     f"Total: {total_time:.2f}s",
                     end=""
                 )
 
             # Per-frame status (overwrites)
             print(
-                f"\r  ↳ [Frame {i + 1}/{len(ps_values)}] "
+                f"\r  ↳ [Frame {i + 1}/{len(pS_values)}] "
                 f"pS: {pS:.2f} (κ={kappa_i:.2e}) | "
                 f"Last: {frame_time * 1000:.1f}ms | "
                 f"Total: {timer.total:.2f}s",
@@ -215,8 +215,8 @@ def run_simulation(
     Args:
         config: Simulation configuration
         weight_batches: List of (T, Gp, Gn) weight configurations
-        ps_range: (min, max) for pS parameter sweep (entropy)
-        n_ps_points: Number of entropy parameters to sample
+        pS_range: (min, max) for pS parameter sweep (entropy)
+        n_pS_points: Number of entropy parameters to sample
     """
     # Apply random seed
     config.apply_seed()
@@ -238,15 +238,15 @@ def run_simulation(
     plotters = setup_plotters()
 
     # Generate parameter sweep (entropy parameterization)
-    ps_values = generate_ps_sweep(pS_range[0], pS_range[1], n_pS_points)
+    pS_values = generate_pS_sweep(pS_range[0], pS_range[1], n_pS_points)
 
     # Convert to kappa for display
-    kappa_min = config.ps_to_kappa(pS_range[1])  # Higher pS = lower kappa
-    kappa_max = config.ps_to_kappa(pS_range[0])  # Lower pS = higher kappa
+    kappa_min = config.pS_to_kappa(pS_range[1])  # Higher pS = lower kappa
+    kappa_max = config.pS_to_kappa(pS_range[0])  # Lower pS = higher kappa
 
     print(f"pS range: {pS_range[0]} → {pS_range[1]} (entropy parameterization)")
     print(f"κ range: {kappa_max:.2e} → {kappa_min:.2e} (concentration)")
-    print(f"Number of points: {len(ps_values)}\n")
+    print(f"Number of points: {len(pS_values)}\n")
 
     # Process each weight configuration
     for weights in weight_batches:
@@ -256,7 +256,7 @@ def run_simulation(
             markov=markov,
             plotters=plotters,
             weights=weights,
-            ps_values=ps_values
+            pS_values=pS_values
         )
 
     print(f"\n{'='*60}")
@@ -264,16 +264,16 @@ def run_simulation(
     print(f"{'='*60}\n")
 
 
-def main():
+def main(pL, pG, pS_):
     """Main entry point for the simulation."""
 
     # Create configuration
     config = SimulationConfig(
-        chain_length=128,
-        n_chains=8,
+        pL=pL,
+        pGamma=pG,
         seed=1738,
         device="cpu",  # Change to "cuda" if GPU available
-        pS_range=(5.0, 9.0),  # Entropy range (flexible → stiff)
+        pS_range=(2.0, 12.0),  # Entropy range (flexible → stiff)
         frame_dpi=256,
         gif_duration=20
     )
@@ -284,16 +284,22 @@ def main():
         (1, 0, 0),  # Pure trans
         (1, 1, 1),  # Maximum Entropy
         (0, 0, 1),  # Pure gauche-
+        (0, 1, 0),  # Pure gauche+
+        (0, 1, 1),  # Degenerate Diamond collapse
     ]
 
     # Run simulation
     run_simulation(
         config=config,
         weight_batches=weight_batches,
-        pS_range=(4.0, 10.0),
-        n_pS_points=401
+        pS_range=pS_,
+        n_pS_points=201
     )
 
 
 if __name__ == "__main__":
-    main()
+    #main(pL=6, pG=1, pS_=(5.0, 9.0))
+
+    l = 8
+    for g in range(l):
+        main(pL=l, pG=g, pS_=(5.0, 9.0))

@@ -16,9 +16,10 @@ class TorsionMCMC:
     """
     Monte Carlo Markov Chain polymer chain generator.
 
-    Builds 3D polymer chains by iteratively applying torsion rotations
-    to bond vectors. Each monomer is added by rotating the previous bond
-    around the current bond axis by the sampled torsion angle.
+    Builds a single 3D polymer chain of length 2^pL by iteratively
+    applying torsion rotations to bond vectors. Each monomer is added
+    by rotating the previous bond around the current bond axis by the
+    sampled torsion angle.
 
     The algorithm:
     1. Initialize with two initial bond vectors
@@ -27,35 +28,36 @@ class TorsionMCMC:
        - Add new monomer at rotated position
        - Update bond vectors for next iteration
 
+    The resulting chain can be bisected for hierarchical analysis
+    via the PolymerAnalyzer using pGamma parameter.
+
     Attributes:
-        chain_length: Number of monomers per chain
-        n_chains: Number of independent chains
-        n_batches: Number of parameter sets (e.g., different kappa values)
-        shape: Full tensor shape (3, chain_length, n_chains, n_batches)
+        total_length: Total number of monomers (2^pL)
+        n_batches: Number of parameter sets (e.g., different pS values)
+        shape: Full tensor shape (3, total_length, n_batches)
     """
 
     def __init__(
-            self,
-            config: SimulationConfig,
-            n_batches: int = 1
+        self,
+        config: SimulationConfig,
+        n_batches: int = 1
     ):
         """
         Initialize MCMC chain builder.
 
         Args:
-            config: Simulation configuration
-            n_batches: Number of parameter batches to process simultaneously
+            config: Simulation configuration (uses pL for total length)
+            n_batches: Number of parameter batches (e.g., different pS values)
         """
         self._device = config.torch_device
-        self.chain_length = config.chain_length
-        self.n_chains = config.n_chains
+        self.total_length = config.total_length  # 2^pL
         self.n_batches = n_batches
 
-        # Tensor shapes for batched operations
-        # Vectors: (3, n_chains, n_batches)
-        # Full chains: (3, chain_length, n_chains, n_batches)
-        self.batch_vec_shape = (3, self.n_chains, n_batches)
-        self.shape = (3, self.chain_length, self.n_chains, self.n_batches)
+        # Tensor shapes for single chain
+        # Bond vectors: (3, n_batches)
+        # Full chain: (3, total_length, n_batches)
+        self.batch_vec_shape = (3, n_batches)
+        self.shape = (3, self.total_length, n_batches)
 
         # State variables
         self.prev_bond: Optional[torch.Tensor] = None
@@ -63,9 +65,9 @@ class TorsionMCMC:
         self._chains: Optional[torch.Tensor] = None
         self._monomer_index: int = 0
 
-    def init_chains(self, alignment: float = 1 / 3) -> None:
+    def init_chains(self, alignment: float = 1/3) -> None:
         """
-        Initialize polymer chains with starting configuration.
+        Initialize polymer chain with starting configuration.
 
         Sets up the first three monomers:
         - Monomer 0: at -prev_bond (behind origin)
@@ -94,11 +96,11 @@ class TorsionMCMC:
             dtype=torch.float64
         )
 
-        # Expand to batch dimensions: (3, 1, 1) -> (3, N, K)
-        self.prev_bond = init_prev.view(3, 1, 1).expand(self.batch_vec_shape)
-        self.curr_bond = init_curr.view(3, 1, 1).expand(self.batch_vec_shape)
+        # Expand to batch dimensions: (3, 1) -> (3, K)
+        self.prev_bond = init_prev.view(3, 1).expand(self.batch_vec_shape)
+        self.curr_bond = init_curr.view(3, 1).expand(self.batch_vec_shape)
 
-        # Allocate chain storage: (3, L, N, K)
+        # Allocate chain storage: (3, L, K)
         self._chains = torch.zeros(
             self.shape,
             device=self._device,
@@ -106,22 +108,22 @@ class TorsionMCMC:
         )
 
         # Place first three monomers
-        self._chains[:, 0, :, :] = -self.prev_bond  # Behind origin
+        self._chains[:, 0, :] = -self.prev_bond  # Behind origin
         # Monomer 1 at origin (already zeros)
-        self._chains[:, 2, :, :] = self.curr_bond  # Ahead of origin
+        self._chains[:, 2, :] = self.curr_bond   # Ahead of origin
 
         self._monomer_index = 1
 
     def step(self, torsion_angle: torch.Tensor) -> None:
         """
-        Add one monomer to each chain via torsion rotation.
+        Add one monomer to the chain via torsion rotation.
 
         Rotates the previous bond vector around the current bond axis
         by the given torsion angle, then adds the new monomer at the
         resulting position.
 
         Args:
-            torsion_angle: Rotation angles, shape (n_chains, n_batches)
+            torsion_angle: Rotation angles, shape (n_batches,)
         """
         # Rotate previous bond around current bond axis
         next_bond = rodrigues_rotation(
@@ -133,7 +135,7 @@ class TorsionMCMC:
 
         # Place new monomer relative to current position
         self._chains[:, self._monomer_index + 1] = (
-                self._chains[:, self._monomer_index] + next_bond
+            self._chains[:, self._monomer_index] + next_bond
         )
 
         # Update bond vectors for next iteration
@@ -143,36 +145,37 @@ class TorsionMCMC:
 
     def run(self, torsion_samples: torch.Tensor) -> None:
         """
-        Generate complete polymer chains from torsion angle samples.
+        Generate complete polymer chain from torsion angle samples.
 
         Args:
-            torsion_samples: Torsion angles, shape (n_batches, n_chains, L)
-                            or (n_batches, n_chains, L, 1)
+            torsion_samples: Torsion angles, shape (1, L, K)
+                            where L = 2^pL (total length)
 
         Notes:
-            Automatically initializes chains and iterates through all
-            torsion angles to build complete polymer configurations.
+            Automatically initializes chain and iterates through all
+            torsion angles to build complete polymer configuration.
         """
-        # Handle optional trailing dimension
-        if torsion_samples.dim() == 4:
-            torsion_samples = torsion_samples.squeeze(-1)
+        # Squeeze out the first dimension: (1, L, K) -> (L, K)
+        if torsion_samples.dim() == 3 and torsion_samples.shape[0] == 1:
+            torsion_samples = torsion_samples.squeeze(0)
 
         # Initialize starting configuration
         self.init_chains()
 
-        # Build chains monomer by monomer
-        for i in range(self._monomer_index, self.chain_length - 1):
-            # Extract torsion angles for this step: (n_batches, n_chains)
-            tau_i = torsion_samples[:, i]
+        # Build chain monomer by monomer
+        for i in range(self._monomer_index, self.total_length - 1):
+            # Extract torsion angles for this step: (K,)
+            tau_i = torsion_samples[i]
             self.step(tau_i)
 
     @property
     def chains(self) -> torch.Tensor:
         """
-        Get generated polymer chains.
+        Get generated polymer chain.
 
         Returns:
-            Chain coordinates, shape (3, chain_length, n_chains, n_batches)
+            Chain coordinates, shape (3, total_length, n_batches)
+            Single long chain that can be bisected for analysis
         """
         return self._chains
 

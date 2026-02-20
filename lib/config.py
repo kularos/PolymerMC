@@ -19,20 +19,32 @@ class SimulationConfig:
     Central configuration for polymer Monte Carlo simulation.
 
     This class manages:
-    - Simulation parameters (chain length, number of chains)
+    - Simulation parameters (hierarchical bisection via pL and pGamma)
     - Hardware configuration (CPU/GPU device)
     - Random number generator seeding
     - Sampler parameters (concentration ranges, resolution)
     - File paths (cache, output directories)
     - Visualization settings
 
+    Hierarchical Bisection Structure:
+        The simulation generates ONE long chain of length 2^pL, which can be
+        analyzed at different subdivision levels via pGamma:
+        - pL = log2(total_length): Total monomers in the full chain
+        - pGamma = log2(n_bisections): How many times to subdivide
+
+        Example (pL=12, total=4096):
+            pGamma=0: 1 chain × 4096 monomers
+            pGamma=1: 2 chains × 2048 monomers
+            pGamma=2: 4 chains × 1024 monomers
+            pGamma=3: 8 chains × 512 monomers
+
     Attributes:
-        chain_length: Number of monomers in each polymer chain
-        n_chains: Number of independent polymer chains to simulate
+        pL: log2 of total chain length (pL=7 → 128, pL=12 → 4096)
+        pGamma: log2 of number of bisections (pGamma=3 → 8 chains)
         seed: Random seed for reproducibility (None = random seed)
         device: Device for PyTorch tensors ("cpu" or "cuda")
-        k_range: (min, max) concentration parameter range for Von Mises
-        k_res: Number of kappa values in logarithmic grid
+        pS_range: (min, max) entropy parameter range for Von Mises
+        pS_res: Number of pS values in grid
         p_res: Number of probability values in CDF grid
         tau_centers: Torsion angle centers in degrees (Trans, Gauche+, Gauche-)
         cache_dir: Directory for caching ICDF lookup tables
@@ -42,9 +54,9 @@ class SimulationConfig:
         gif_fps: Frames per second for animations
     """
 
-    # Core simulation parameters
-    chain_length: int = 128
-    n_chains: int = 8
+    # Core simulation parameters - hierarchical bisection
+    pL: int = 7  # log2(total_length): pL=7 → 128 monomers, pL=12 → 4096 monomers
+    pGamma: int = 3  # log2(n_bisections): pGamma=3 → 8 chains
     seed: int | None = 1738
 
     # Hardware configuration
@@ -54,10 +66,10 @@ class SimulationConfig:
     # pS parameterization: pS = 7 - log10(κ)
     # Higher pS = higher entropy (more flexible chains)
     # pS=5 → κ=10², pS=7 → κ=1, pS=9 → κ=10⁻²
-    pS_range: Tuple[float, float] = (2.0, 12.0)  # Entropy range
+    pS_range: Tuple[float, float] = (5.0, 9.0)  # Entropy range
     pS_res: int = 1000  # Resolution of pS grid
     p_res: int = 100000  # Probability resolution for ICDF
-    tau_c: Tuple[float, float, float] = (0.0, -120.0, 120.0)  # degrees
+    tau_centers: Tuple[float, float, float] = (0.0, -120.0, 120.0)  # degrees
 
     # File system paths
     cache_dir: Path = field(default_factory=lambda: Path("./local/cache/ICDF_cache"))
@@ -118,9 +130,54 @@ class SimulationConfig:
         return self._torch_device
 
     @property
+    def total_length(self) -> int:
+        """
+        Get total number of monomers from pL.
+
+        Returns:
+            Total chain length = 2^pL
+
+        Example:
+            >>> config = SimulationConfig(pL=10)
+            >>> config.total_length
+            1024
+        """
+        return 2 ** self.pL
+
+    @property
+    def chain_length(self) -> int:
+        """
+        Get length of each bisected chain.
+
+        Returns:
+            Chain length = 2^pL / 2^pGamma = 2^(pL - pGamma)
+
+        Example:
+            >>> config = SimulationConfig(pL=12, pGamma=2)
+            >>> config.chain_length  # 4096 / 4 = 1024
+            1024
+        """
+        return 2 ** (self.pL - self.pGamma)
+
+    @property
+    def n_chains(self) -> int:
+        """
+        Get number of bisected chains.
+
+        Returns:
+            Number of chains = 2^pGamma
+
+        Example:
+            >>> config = SimulationConfig(pGamma=3)
+            >>> config.n_chains  # 2^3 = 8
+            8
+        """
+        return 2 ** self.pGamma
+
+    @property
     def tau_centers_radians(self) -> np.ndarray:
         """Get torsion angle centers converted to radians."""
-        return np.radians(self.tau_c)
+        return np.radians(self.tau_centers)
 
     @property
     def kappa_range(self) -> Tuple[float, float]:
@@ -128,16 +185,16 @@ class SimulationConfig:
         Get kappa range from pS range.
 
         Returns:
-            (kappa_min, kappa_max) corresponding to (ps_max, ps_min)
+            (kappa_min, kappa_max) corresponding to (pS_max, pS_min)
             Note the reversal: higher pS = lower kappa
         """
-        ps_min, ps_max = self.pS_range
-        kappa_max = 10 ** (7 - ps_min)  # Low entropy = high kappa
-        kappa_min = 10 ** (7 - ps_max)  # High entropy = low kappa
+        pS_min, pS_max = self.pS_range
+        kappa_max = 10 ** (7 - pS_min)  # Low entropy = high kappa
+        kappa_min = 10 ** (7 - pS_max)  # High entropy = low kappa
         return (kappa_min, kappa_max)
 
     @staticmethod
-    def ps_to_kappa(ps: float | np.ndarray) -> float | np.ndarray:
+    def pS_to_kappa(ps: float | np.ndarray) -> float | np.ndarray:
         """
         Convert pS (entropy parameter) to κ (concentration).
 
@@ -148,9 +205,9 @@ class SimulationConfig:
             kappa: Concentration parameter (higher = more stiff)
 
         Example:
-                SimulationConfig.ps_to_kappa(5.0)
+            >>> SimulationConfig.pS_to_kappa(5.0)
             100.0  # Flexible
-                SimulationConfig.ps_to_kappa(9.0)
+            >>> SimulationConfig.pS_to_kappa(9.0)
             0.01   # Stiff
         """
         return 10 ** (7 - ps)
@@ -167,9 +224,9 @@ class SimulationConfig:
             ps: Entropy parameter
 
         Example:
-                SimulationConfig.kappa_to_ps(100.0)
+            >>> SimulationConfig.kappa_to_ps(100.0)
             5.0
-                SimulationConfig.kappa_to_ps(0.01)
+            >>> SimulationConfig.kappa_to_ps(0.01)
             9.0
         """
         return 7 - np.log10(kappa)
@@ -195,7 +252,7 @@ class SimulationConfig:
             f"SimulationConfig(\n"
             f"  chain_length={self.chain_length}, n_chains={self.n_chains}\n"
             f"  seed={self.seed}, device={self.device}\n"
-            f"  pS_range={self.pS_range}, pS_res={self.pS_res}\n"
+            f"  k_range={self.k_range}, k_res={self.k_res}\n"
             f"  cache_dir={self.cache_dir}\n"
             f"  output_dir={self.output_dir}\n"
             f")"

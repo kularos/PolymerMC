@@ -149,7 +149,7 @@ class GridCache:
 
         Args:
             **params: Any parameters that define cache uniqueness
-                Common params: class_name, weights, ps_range, ps_res, p_res
+                Common params: class_name, weights, pS_range, pS_res, p_res
 
         Returns:
             Human-readable cache key string
@@ -158,8 +158,8 @@ class GridCache:
                 cache._make_cache_key(
             ...     class_name="VonMisesSampler",
             ...     weights=(0.6, 0.2, 0.2),
-            ...     ps_range=(5.0, 9.0),
-            ...     ps_res=1000,
+            ...     pS_range=(5.0, 9.0),
+            ...     pS_res=1000,
             ...     p_res=100000
             ... )
             'VonMisesSampler_w(0.6,0.2,0.2)_pS(5.0,9.0,1000)_p(100000)'
@@ -176,10 +176,10 @@ class GridCache:
             parts.append(f"w({w[0]},{w[1]},{w[2]})")
 
         # Add pS range and resolution (entropy parameterization)
-        if 'ps_range' in params and 'ps_res' in params:
-            ps_min, ps_max = params['ps_range']
-            ps_res = params['ps_res']
-            parts.append(f"pS({ps_min},{ps_max},{ps_res})")
+        if 'pS_range' in params and 'pS_res' in params:
+            pS_min, pS_max = params['pS_range']
+            pS_res = params['pS_res']
+            parts.append(f"pS({pS_min},{pS_max},{pS_res})")
 
         # Add probability resolution (p)
         if 'p_res' in params:
@@ -194,7 +194,7 @@ class GridCache:
         Args:
             **params: Parameters defining the cache key
                 Required: class_name
-                Typical: weights, ps_range, ps_res, p_res
+                Typical: weights, pS_range, pS_res, p_res
 
         Returns:
             Cached grid tensor, or None if not found
@@ -203,8 +203,8 @@ class GridCache:
                 grid = cache.load(
             ...     class_name="VonMisesSampler",
             ...     weights=(0.6, 0.2, 0.2),
-            ...     ps_range=(5.0, 9.0),
-            ...     ps_res=1000,
+            ...     pS_range=(5.0, 9.0),
+            ...     pS_res=1000,
             ...     p_res=100000
             ... )
         """
@@ -235,8 +235,8 @@ class GridCache:
             ...     grid,
             ...     class_name="VonMisesSampler",
             ...     weights=(0.6, 0.2, 0.2),
-            ...     ps_range=(5.0, 9.0),
-            ...     ps_res=1000,
+            ...     pS_range=(5.0, 9.0),
+            ...     pS_res=1000,
             ...     p_res=100000
             ... )
         """

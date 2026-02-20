@@ -230,7 +230,7 @@ class HistogramPlotter(BasePlotter):
 
         super().__init__(fig, ax)
 
-    def plot(self, analyzer, bins: int = 81) -> None:
+    def plot(self, analyzer, bins: int = 72) -> None:
         """
         Plot torsion angle distribution.
 
@@ -246,22 +246,38 @@ class HistogramPlotter(BasePlotter):
         self.ax.set_theta_zero_location("N")
         self.ax.set_thetagrids(CONFORMER_ANGLES, labels=CONFORMER_LABELS)
 
-        # Compute histogram
-        sample = analyzer.taus.flatten()
-        counts, bin_edges = np.histogram(
-            sample,
-            bins=bins,
-            range=[-np.pi, np.pi]
-        )
+        # 2. Define bin edges shifted by half a width
+        # We start at -width/2 so that 0 is the midpoint of the first bin
+        width = 2 * np.pi / bins
+
+        start_edge = -width / 2
+        bin_edges = np.arange(start_edge, 2 * np.pi + width / 2, width)
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-        # Plot as polar bar chart
-        self.ax.bar(
-            bin_centers,
-            counts,
-            width=(2 * np.pi) / bins,
-            bottom=0.0
-        )
+        # 3. Digitize/Histogram the data
+        # Ensure data is within [start_edge, start_edge + 360]
+
+
+        # Compute histogram
+        sample = analyzer.taus
+        bottom = 0
+        for i in range(analyzer.shape[2]):
+            sample_norm = (sample[:, i] - start_edge) % (2 * np.pi) + start_edge
+
+            counts, _ = np.histogram(
+                sample_norm,
+                bins=bin_edges,
+            )
+
+            # Plot as polar bar chart
+            self.ax.bar(
+                bin_centers,
+                counts,
+                width=(2 * np.pi) / bins,
+                bottom=bottom
+            )
+            bottom += counts
+
 
 
 class PhasePlotter(BasePlotter):
@@ -275,6 +291,9 @@ class PhasePlotter(BasePlotter):
     def __init__(self, fig: Optional[plt.Figure] = None, ax=None):
         """Initialize phase space plotter."""
         super().__init__(fig, ax)
+        self.ax.set_title("Phase Space")
+        self.ax.set_xlabel("Net Torsion (Turns)")
+        self.ax.set_ylabel("Net Displacement (Bond Units)")
 
     def _compute_ensemble_stats(
             self,
@@ -359,9 +378,6 @@ class PhasePlotter(BasePlotter):
             torsion_range: Fraction of chain_length for torsion axis
         """
         self.ax.clear()
-        self.ax.set_title("Phase Space")
-        self.ax.set_xlabel("Net Torsion (Turns)")
-        self.ax.set_ylabel("Net Displacement (Bond Units)")
 
         # Plot individual chain trajectories
         for i in range(analyzer.shape[2]):
@@ -369,18 +385,19 @@ class PhasePlotter(BasePlotter):
             displacement = analyzer.dist[0, :, i]
             self.ax.plot(torsion, displacement, lw=1, alpha=0.7)
 
-        # Compute and display ensemble statistics
-        mean, cov = self._compute_ensemble_stats(analyzer)
+        if analyzer.shape[2] >=3:
+            # Compute and display ensemble statistics
+            mean, cov = self._compute_ensemble_stats(analyzer)
 
-        # 2-sigma and 1-sigma confidence ellipses
-        self._plot_covariance_ellipse(
-            mean, cov, n_std=2.0,
-            facecolor='tab:red', alpha=0.1
-        )
-        self._plot_covariance_ellipse(
-            mean, cov, n_std=1.0,
-            facecolor='tab:red', alpha=0.3
-        )
+            # 2-sigma and 1-sigma confidence ellipses
+            self._plot_covariance_ellipse(
+                mean, cov, n_std=2.0,
+                facecolor='tab:red', alpha=0.1
+            )
+            self._plot_covariance_ellipse(
+                mean, cov, n_std=1.0,
+                facecolor='tab:red', alpha=0.3
+            )
 
         # Set axis limits
         if max_dist is None:
