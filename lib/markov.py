@@ -1,40 +1,44 @@
 """
 Markov Chain Monte Carlo for polymer chain generation.
 
-This module implements the MCMC algorithm for generating polymer chains
-from torsion angle samples using bond rotation mechanics.
+Provides two MCMC chain builders on the manifold hierarchy:
+  - TorsionMCMC : driven by scalar torsion angles from VonMisesSampler (S¹)
+  - FisherMCMC  : driven by 3D bond vectors from FisherSampler (S²)
+
+Both produce chains of shape (3, 2^pL, K) and torsion samples of shape
+(2^pL, K), making them drop-in compatible with PolymerAnalyzer.
+
+Class hierarchy:
+    BaseMCMC (abstract)
+    ├── TorsionMCMC   driven by VonMisesSampler — unchanged from original
+    └── FisherMCMC    driven by FisherSampler
+                      owns sequential loop, reconstructs torsion per step
 """
 
 import torch
-from typing import Optional
+from abc import ABC, abstractmethod
+from typing import Optional, Tuple
 
 from .config import SimulationConfig
 from .core import rodrigues_rotation
 
 
-class TorsionMCMC:
+# =============================================================================
+# Abstract base MCMC
+# =============================================================================
+
+class BaseMCMC(ABC):
     """
-    Monte Carlo Markov Chain polymer chain generator.
+    Abstract base class for polymer MCMC chain builders.
 
-    Builds a single 3D polymer chain of length 2^pL by iteratively
-    applying torsion rotations to bond vectors. Each monomer is added
-    by rotating the previous bond around the current bond axis by the
-    sampled torsion angle.
-
-    The algorithm:
-    1. Initialize with two initial bond vectors
-    2. For each torsion angle sample:
-       - Rotate previous bond around current bond
-       - Add new monomer at rotated position
-       - Update bond vectors for next iteration
-
-    The resulting chain can be bisected for hierarchical analysis
-    via the PolymerAnalyzer using pGamma parameter.
+    Manages chain storage, initialization, and the shared monomer-placement
+    logic. Subclasses implement step() and run() for their specific
+    sampling geometry.
 
     Attributes:
         total_length: Total number of monomers (2^pL)
-        n_batches: Number of parameter sets (e.g., different pS values)
-        shape: Full tensor shape (3, total_length, n_batches)
+        n_batches:    Number of parameter batches (K — e.g. pS values)
+        shape:        Full chain tensor shape (3, total_length, K)
     """
 
     def __init__(
@@ -46,86 +50,140 @@ class TorsionMCMC:
         Initialize MCMC chain builder.
 
         Args:
-            config: Simulation configuration (uses pL for total length)
-            n_batches: Number of parameter batches (e.g., different pS values)
+            config:    Simulation configuration (uses pL for total length)
+            n_batches: Number of parameter batches K
         """
         self._device = config.torch_device
         self.total_length = config.total_length  # 2^pL
         self.n_batches = n_batches
+        self.alignment = config.fisher_bond_angle_alignment  # alignment param
 
-        # Tensor shapes for single chain
-        # Bond vectors: (3, n_batches)
-        # Full chain: (3, total_length, n_batches)
         self.batch_vec_shape = (3, n_batches)
         self.shape = (3, self.total_length, n_batches)
 
-        # State variables
         self.prev_bond: Optional[torch.Tensor] = None
         self.curr_bond: Optional[torch.Tensor] = None
         self._chains: Optional[torch.Tensor] = None
+        self._taus: Optional[torch.Tensor] = None    # reconstructed torsions
         self._monomer_index: int = 0
 
-    def init_chains(self, alignment: float = 1/3) -> None:
+    def init_chains(self) -> None:
         """
-        Initialize polymer chain with starting configuration.
+        Initialize chain storage and starting bond configuration.
 
-        Sets up the first three monomers:
-        - Monomer 0: at -prev_bond (behind origin)
-        - Monomer 1: at origin
-        - Monomer 2: at +curr_bond (ahead)
+        Places first three monomers:
+            monomer 0: at -prev_bond  (behind origin)
+            monomer 1: at origin
+            monomer 2: at +curr_bond  (ahead)
 
-        Args:
-            alignment: Controls initial bond angle via z-component.
-                      alignment=1 → parallel bonds (0°)
-                      alignment=0 → perpendicular bonds (90°)
-                      alignment=1/3 → tetrahedral angle (~109.5°)
+        The initial bond angle is set by config.fisher_bond_angle_alignment:
+            alignment=1   → parallel bonds (0°)
+            alignment=0   → perpendicular (90°)
+            alignment=1/3 → tetrahedral (~109.5°)
         """
-        # Initial bond vectors
-        # prev_bond points from monomer 0 to 1
-        # curr_bond points from monomer 1 to 2
-        y_component = (1 - alignment ** 2) ** 0.5
+        a = self.alignment
+        y_component = (1 - a ** 2) ** 0.5
 
         init_prev = torch.tensor(
-            [0.0, y_component, alignment],
-            device=self._device,
-            dtype=torch.float64
+            [0.0, y_component, a],
+            device=self._device, dtype=torch.float64
         )
         init_curr = torch.tensor(
             [0.0, 0.0, 1.0],
-            device=self._device,
-            dtype=torch.float64
+            device=self._device, dtype=torch.float64
         )
 
-        # Expand to batch dimensions: (3, 1) -> (3, K)
-        self.prev_bond = init_prev.view(3, 1).expand(self.batch_vec_shape)
-        self.curr_bond = init_curr.view(3, 1).expand(self.batch_vec_shape)
+        self.prev_bond = init_prev.view(3, 1).expand(self.batch_vec_shape).clone()
+        self.curr_bond = init_curr.view(3, 1).expand(self.batch_vec_shape).clone()
 
-        # Allocate chain storage: (3, L, K)
         self._chains = torch.zeros(
-            self.shape,
-            device=self._device,
-            dtype=torch.float64
+            self.shape, device=self._device, dtype=torch.float64
+        )
+        self._taus = torch.zeros(
+            (self.total_length, self.n_batches),
+            device=self._device, dtype=torch.float64
         )
 
-        # Place first three monomers
-        self._chains[:, 0, :] = -self.prev_bond  # Behind origin
-        # Monomer 1 at origin (already zeros)
-        self._chains[:, 2, :] = self.curr_bond   # Ahead of origin
+        self._chains[:, 0, :] = -self.prev_bond
+        # monomer 1 at origin (already zeros)
+        self._chains[:, 2, :] = self.curr_bond
 
         self._monomer_index = 1
 
-    def step(self, torsion_angle: torch.Tensor) -> None:
+    def _place_monomer(self, next_bond: torch.Tensor) -> None:
         """
-        Add one monomer to the chain via torsion rotation.
-
-        Rotates the previous bond vector around the current bond axis
-        by the given torsion angle, then adds the new monomer at the
-        resulting position.
+        Place next monomer using the given bond vector.
 
         Args:
-            torsion_angle: Rotation angles, shape (n_batches,)
+            next_bond: Bond vector, shape (3, K) — should be unit length
         """
-        # Rotate previous bond around current bond axis
+        self._chains[:, self._monomer_index + 1] = (
+            self._chains[:, self._monomer_index] + next_bond
+        )
+
+    @abstractmethod
+    def step(self, *args, **kwargs) -> None:
+        """Advance chain by one monomer."""
+        ...
+
+    @abstractmethod
+    def run(self, *args, **kwargs) -> None:
+        """Generate complete chain."""
+        ...
+
+    @property
+    def chains(self) -> torch.Tensor:
+        """
+        Generated chain coordinates, shape (3, total_length, K).
+
+        Drop-in compatible with PolymerAnalyzer input.
+        """
+        return self._chains
+
+    @property
+    def torsion_samples(self) -> torch.Tensor:
+        """
+        Torsion angle samples, shape (1, total_length, K).
+
+        For TorsionMCMC: the sampled angles directly.
+        For FisherMCMC:  torsion angles reconstructed from consecutive bonds.
+
+        Shape matches VonMisesSampler output for PolymerAnalyzer compatibility.
+        """
+        return self._taus.unsqueeze(0)  # (1, total_length, K)
+
+    def reset(self) -> None:
+        """Reset MCMC state for a new run."""
+        self.prev_bond = None
+        self.curr_bond = None
+        self._chains = None
+        self._taus = None
+        self._monomer_index = 0
+
+
+# =============================================================================
+# Torsion MCMC (S¹) — driven by VonMisesSampler, unchanged from original
+# =============================================================================
+
+class TorsionMCMC(BaseMCMC):
+    """
+    MCMC chain builder driven by scalar torsion angles (VonMisesSampler).
+
+    Builds a 3D polymer chain by rotating the previous bond around the
+    current bond axis by the sampled torsion angle at each step. Bond
+    length and bond angle are preserved exactly (Rodrigues rotation).
+
+    This is the original TorsionMCMC, now inheriting from BaseMCMC.
+    All behavior is identical to the previous version.
+    """
+
+    def step(self, torsion_angle: torch.Tensor) -> None:
+        """
+        Add one monomer via torsion rotation.
+
+        Args:
+            torsion_angle: Rotation angles, shape (K,)
+        """
         next_bond = rodrigues_rotation(
             self.prev_bond,
             self.curr_bond,
@@ -133,55 +191,106 @@ class TorsionMCMC:
             vector_dim=0
         )
 
-        # Place new monomer relative to current position
-        self._chains[:, self._monomer_index + 1] = (
-            self._chains[:, self._monomer_index] + next_bond
-        )
+        self._place_monomer(next_bond)
+        self._taus[self._monomer_index] = torsion_angle
 
-        # Update bond vectors for next iteration
         self.prev_bond = self.curr_bond
         self.curr_bond = next_bond
         self._monomer_index += 1
 
     def run(self, torsion_samples: torch.Tensor) -> None:
         """
-        Generate complete polymer chain from torsion angle samples.
+        Generate complete chain from pre-sampled torsion angles.
 
         Args:
-            torsion_samples: Torsion angles, shape (1, L, K)
-                            where L = 2^pL (total length)
-
-        Notes:
-            Automatically initializes chain and iterates through all
-            torsion angles to build complete polymer configuration.
+            torsion_samples: Torsion angles, shape (1, 2^pL, K)
         """
-        # Squeeze out the first dimension: (1, L, K) -> (L, K)
         if torsion_samples.dim() == 3 and torsion_samples.shape[0] == 1:
-            torsion_samples = torsion_samples.squeeze(0)
+            torsion_samples = torsion_samples.squeeze(0)  # (2^pL, K)
 
-        # Initialize starting configuration
         self.init_chains()
 
-        # Build chain monomer by monomer
         for i in range(self._monomer_index, self.total_length - 1):
-            # Extract torsion angles for this step: (K,)
-            tau_i = torsion_samples[i]
-            self.step(tau_i)
+            self.step(torsion_samples[i])
 
-    @property
-    def chains(self) -> torch.Tensor:
+
+# =============================================================================
+# Fisher MCMC (S²) — driven by FisherSampler
+# =============================================================================
+
+class FisherMCMC(BaseMCMC):
+    """
+    MCMC chain builder driven by 3D bond vectors from FisherSampler.
+
+    At each step, the FisherSampler is called with the current local frame
+    (curr_bond, prev_bond) and returns a new unit bond vector sampled from
+    the Fisher mixture on S². The torsion angle is reconstructed from
+    consecutive bond vectors and stored for PolymerAnalyzer compatibility.
+
+    The run() method owns the sequential loop and is responsible for
+    passing the evolving local frame state to the sampler — this is what
+    makes the chain stateful.
+
+    Output shapes match TorsionMCMC exactly:
+        chains:          (3, 2^pL, K)
+        torsion_samples: (1, 2^pL, K)  ← reconstructed torsion angles
+
+    Validation:
+        Set kappa_theta to a large value (e.g. 1e6) and compare torsion
+        histograms with TorsionMCMC at the same kappa_phi — they should
+        be numerically indistinguishable.
+    """
+
+    def step(
+        self,
+        next_bond: torch.Tensor,
+        tau: torch.Tensor,
+    ) -> None:
         """
-        Get generated polymer chain.
+        Add one monomer using a pre-sampled bond vector.
 
-        Returns:
-            Chain coordinates, shape (3, total_length, n_batches)
-            Single long chain that can be bisected for analysis
+        Unlike TorsionMCMC.step(), the bond vector is computed externally
+        by FisherSampler and passed in directly. This keeps the sampling
+        logic in the sampler and the chain-building logic in the MCMC.
+
+        Args:
+            next_bond: Unit bond vector, shape (3, K)
+            tau:       Reconstructed torsion angle, shape (K,)
         """
-        return self._chains
+        self._place_monomer(next_bond)
+        self._taus[self._monomer_index] = tau
 
-    def reset(self) -> None:
-        """Reset the MCMC state for a new run."""
-        self.prev_bond = None
-        self.curr_bond = None
-        self._chains = None
-        self._monomer_index = 0
+        self.prev_bond = self.curr_bond
+        self.curr_bond = next_bond
+        self._monomer_index += 1
+
+    def run(
+        self,
+        sampler,
+        weights: Tuple[float, float, float],
+        kappa_theta: torch.Tensor,
+        kappa_phi: torch.Tensor,
+    ) -> None:
+        """
+        Generate complete chain by sequentially calling FisherSampler.
+
+        The sequential loop is necessary because each step's mean direction
+        depends on curr_bond, which is only known after the previous step.
+
+        Args:
+            sampler:     FisherSampler instance
+            weights:     Mixture weights (T, Gp, Gn)
+            kappa_theta: Polar concentrations,     shape (K,)
+            kappa_phi:   Azimuthal concentrations, shape (K,)
+        """
+        self.init_chains()
+
+        for i in range(self._monomer_index, self.total_length - 1):
+            next_bond, tau = sampler(
+                weights=weights,
+                curr_bond=self.curr_bond,
+                prev_bond=self.prev_bond,
+                kappa_theta=kappa_theta,
+                kappa_phi=kappa_phi,
+            )
+            self.step(next_bond, tau)

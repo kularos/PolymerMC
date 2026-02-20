@@ -72,6 +72,15 @@ class SimulationConfig:
     p_res: int = 100000  # Probability resolution for ICDF
     tau_centers: Tuple[float, float, float] = (0.0, -120.0, 120.0)  # degrees
 
+    # Fisher sampler parameters (S² — von Mises–Fisher mixture)
+    # pS_theta_range: entropy range for the polar (bond angle) concentration
+    #   pS_θ → high : uniform polar sampling (freely-jointed chain limit)
+    #   pS_θ → low  : bond angle frozen at tetrahedral value (→ Von Mises limit)
+    # fisher_bond_angle_alignment: sets cos(mean polar offset) from curr_bond,
+    #   matching init_chains() so the Fisher mean sits at the tetrahedral angle
+    pS_theta_range: Tuple[float, float] = (5.0, 9.0)   # polar entropy range
+    fisher_bond_angle_alignment: float = 1 / 3          # tetrahedral ~109.5°
+
     # File system paths
     cache_dir: Path = field(default_factory=lambda: Path("./local/cache/ICDF_cache"))
     output_dir: Path = field(default_factory=lambda: Path("./local/outputs/gifs"))
@@ -159,6 +168,20 @@ class SimulationConfig:
     def tau_centers_radians(self) -> np.ndarray:
         """Get torsion angle centers converted to radians."""
         return np.radians(self.tau_centers)
+
+    @property
+    def fisher_bond_angle(self) -> float:
+        """
+        Mean polar offset for Fisher sampler in radians.
+
+        This is arccos(fisher_bond_angle_alignment), placing the Fisher
+        mean direction at the tetrahedral angle from curr_bond rather
+        than along it — matching TorsionMCMC's fixed bond angle.
+
+        Returns:
+            Polar offset in radians  (alignment=1/3 → ~1.231 rad ≈ 70.5°)
+        """
+        return float(np.arccos(self.fisher_bond_angle_alignment))
 
     @property
     def kappa_range(self) -> Tuple[float, float]:

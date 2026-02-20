@@ -29,8 +29,8 @@ For detailed usage, see run.py or the documentation.
 """
 
 from .config import SimulationConfig
-from .samplers import VonMisesSampler
-from .markov import TorsionMCMC
+from .samplers import VonMisesSampler, FisherSampler
+from .markov import TorsionMCMC, FisherMCMC
 from .analysis import PolymerAnalyzer
 from .core import rodrigues_rotation, align_geodesic
 from .plotting import (
@@ -50,7 +50,9 @@ __all__ = [
 
     # Core functionality
     'VonMisesSampler',
+    'FisherSampler',
     'TorsionMCMC',
+    'FisherMCMC',
     'PolymerAnalyzer',
 
     # Geometric utilities
